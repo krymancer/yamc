@@ -6,30 +6,28 @@ A fast, minimal, dark-by-default desktop mail client that AI agents can drive ov
 
 1. **Speed first.** The UI reads only from a local SQLite database and never waits on the network. Every interaction (open, scroll, switch view, search) should feel instant on 100k+ messages.
 2. **Out of the way.** Clean and minimal, keyboard-first. No unread counts, badges, or notifications. Ever.
-3. **Dark by default, no flashbangs.** HTML email is recoloured to dark before it's shown; one key shows the original.
+3. **Dark by default, no flashbangs.** HTML email is drawn in the app's theme; one key opens the original.
 4. **Private by default.** Remote content is blocked until asked for. No telemetry.
 5. **AI from outside.** No AI inside the app; an MCP server (on by default) lets Claude Code, Codex, etc. read and act on mail.
 6. **Open source, any provider.** Built for the author's accounts first, but nothing provider-specific is hard-coded beyond presets.
 
 ## Stack
 
-- Electron + TypeScript everywhere, built with electron-vite.
-- `imapflow` (IMAP), `nodemailer` (SMTP), `postal-mime` (parsing), `better-sqlite3` + FTS5 (storage/search).
-- React renderer with a virtualized list. Plain CSS variables, no UI kit.
-- Hot paths move to Rust (napi-rs) only if profiling shows the need.
+- Rust, native UI with GPUI and gpui-kit (shadcn-style components). No browser engine.
+- `async-imap` (IMAP) on tokio + rustls, `lettre` (SMTP), `mail-parser` (parsing), `rusqlite` + FTS5 (storage/search), `rmcp` (MCP).
 
 ## Architecture
 
 ```
-renderer (React)  ──IPC──▶  main process
-                              ├─ core/db       SQLite (WAL) + FTS5
-                              ├─ core/sync     one IMAP session per account, IDLE on INBOX
-                              ├─ core/ops      outbox of local changes → server (mark read, archive)
-                              ├─ core/smtp     send
-                              └─ core/mcp      Streamable HTTP MCP server on 127.0.0.1
+crates/yamc (GPUI)  ──calls / events──▶  crates/yamc-core
+                                           ├─ store   SQLite (WAL) + FTS5, conversation summary table
+                                           ├─ sync    a worker and an IDLE connection per account
+                                           ├─ ops     outbox of local changes → server (mark read, archive)
+                                           ├─ smtp    send
+                                           └─ mcp     Streamable HTTP MCP server on 127.0.0.1
 ```
 
-`src/core` has no Electron imports, so it can move into a utility process or a headless daemon later.
+`yamc-core` has no UI code, so it can run as a headless daemon later.
 
 ## Accounts
 
@@ -40,7 +38,7 @@ renderer (React)  ──IPC──▶  main process
 | Outlook | OAuth2 (milestone 2) | Basic auth is disabled. Needs an Azure app registration (public client, PKCE, loopback redirect). |
 | Generic | IMAP/SMTP password | Host/port/TLS entered manually. |
 
-Secrets are encrypted with Electron `safeStorage` (libsecret/KWallet on Linux).
+Passwords are sealed with AES-256-GCM using a key kept in the OS keychain (`secret.key` in the data dir when there is none).
 
 ## Sync
 
@@ -65,10 +63,9 @@ Secrets are encrypted with Electron `safeStorage` (libsecret/KWallet on Linux).
 
 ## Email rendering
 
-- Sanitized with DOMPurify, rendered in a sandboxed iframe (no scripts) with a CSP that blocks remote content.
-- The iframe is dark and hidden until recolouring finishes. Recolouring rewrites computed colours, like Dark Reader's dynamic mode: light backgrounds go dark, dark text goes light, hue is kept, and images are untouched.
-- `d` toggles original colours for the message; "always for this sender" is remembered.
-- `i` loads remote images for the message.
+- Rendered natively in the app's theme, so there's never a white flash. Layout tables are flattened and the mail's own styles, scripts and tracking pixels are dropped.
+- Remote images are blocked until `i`; "always for this sender" is remembered.
+- `O` opens the original in the system browser when the exact look matters.
 - Links open in the system browser.
 
 ## Keyboard
@@ -83,8 +80,8 @@ Secrets are encrypted with Electron `safeStorage` (libsecret/KWallet on Linux).
 | `c` | compose |
 | `/` | search |
 | `g i` | shared inbox |
-| `d` | toggle dark recolouring |
 | `i` | load images |
+| `O` | open original in browser |
 
 ## MCP
 
@@ -98,7 +95,7 @@ Tools: `list_accounts`, `list_inbox`, `search`, `get_thread`, `create_draft`, `l
 1. **POC:** IMAP/SMTP password accounts (Gmail app password, Proton Bridge, generic), shared inbox, folders, conversation view, dark rendering, compose/reply/send, search, MCP server.
 2. Outlook OAuth, then Gmail OAuth.
 3. Attachments (download/attach), move to folder, per-account settings, packaging (AppImage/deb).
-4. Profiling pass; possible Rust core.
+4. Profiling pass.
 
 ## Out of scope (for now)
 

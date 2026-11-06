@@ -23,8 +23,6 @@ cargo run --release
 Data lives in `~/.local/share/yamc` (macOS: `~/Library/Application Support/yamc`); set `YAMC_DATA_DIR` to use another
 folder. Passwords are sealed with a key kept in the system keychain, or in `secret.key` when there is none.
 
-The earlier Electron version is still in `src/` (`npm install && npm run dev`) until the Rust one replaces it.
-
 Add an account in Settings (`g s`):
 
 - **Gmail:** app password (needs 2-Step Verification).
@@ -57,4 +55,3 @@ YAMC_IT=1 cargo test             # plus end-to-end against a real IMAP/SMTP serv
 
 - `crates/yamc-core`: SQLite store, IMAP sync (async-imap, IDLE), SMTP (lettre), MCP server (rmcp). No UI code.
 - `crates/yamc`: the GPUI app: list, conversation, composer, settings, vim keys, themes.
-- `src/`: the Electron version (TypeScript), being replaced.
