@@ -1,0 +1,34 @@
+[package]
+name = "yamc-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+aes-gcm = "0.10.3"
+anyhow = "1.0.104"
+async-imap = { version = "0.12", default-features = false, features = ["runtime-tokio"] }
+axum = "0.8.9"
+base64 = "0.23.1"
+chrono = "0.4.45"
+futures = "0.3.34"
+keyring = "4.2.0"
+lettre = { version = "0.11.23", default-features = false, features = ["builder", "smtp-transport", "hostname", "tokio1-rustls", "rustls-tls"] }
+log = "0.4.35"
+mail-parser = { version = "1", features = ["full_encoding"] }
+rand = "0.10.3"
+rmcp = { version = "3.9.0", features = ["server", "transport-streamable-http-server", "macros", "schemars"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
+schemars = "1.2.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tokio = { version = "1", features = ["full"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+tokio-util = "0.7.20"
+tracing = "0.1.44"
+webpki-roots = "1.0.11"
+
+[dev-dependencies]
+chrono = "0.4.45"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json"] }
+rmcp = { version = "3.9.0", features = ["client", "transport-streamable-http-client-reqwest"] }
