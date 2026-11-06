@@ -234,27 +234,47 @@ impl Core {
         Ok(())
     }
 
+    /// Move the conversation's Inbox copies to Archive (or All Mail).
     pub fn archive_thread(&self, account_id: i64, thread_id: &str) -> Result<()> {
         let (_, target) = self
             .store
             .find_mailbox(account_id, "\\Archive")
             .or_else(|| self.store.find_mailbox(account_id, "\\All"))
             .ok_or_else(|| anyhow!("This account has no Archive folder"))?;
-        let in_inbox: Vec<_> =
+        let copies: Vec<_> =
             self.store.thread_copies(account_id, thread_id).into_iter().filter(|c| c.special_use.as_deref() == Some(INBOX)).collect();
-        if in_inbox.is_empty() {
+        self.move_copies(account_id, copies, &target)
+    }
+
+    /// Move every copy of the conversation to Trash.
+    pub fn trash_thread(&self, account_id: i64, thread_id: &str) -> Result<()> {
+        let (_, target) = self.store.find_mailbox(account_id, "\\Trash").ok_or_else(|| anyhow!("This account has no Trash folder"))?;
+        let gmail = self.store.account(account_id).is_some_and(|a| a.kind == AccountKind::Gmail);
+        let mut copies: Vec<_> = self.store.thread_copies(account_id, thread_id).into_iter().filter(|c| c.path != target).collect();
+        if gmail {
+            // On Gmail folders are labels: trashing one copy trashes the message, so moving the
+            // other labels' copies too would only fail. Prefer the Inbox copy.
+            copies.sort_by_key(|c| c.special_use.as_deref() != Some(INBOX));
+            let mut seen = std::collections::HashSet::new();
+            copies.retain(|c| seen.insert(c.message_key.clone()));
+        }
+        self.move_copies(account_id, copies, &target)
+    }
+
+    fn move_copies(&self, account_id: i64, copies: Vec<crate::store::Copy>, target: &str) -> Result<()> {
+        if copies.is_empty() {
             return Ok(());
         }
         let mut by_path: HashMap<String, Vec<u32>> = HashMap::new();
-        for c in &in_inbox {
+        for c in &copies {
             by_path.entry(c.path.clone()).or_default().push(c.uid);
         }
         self.store.local_change(|tx| {
-            for c in &in_inbox {
+            for c in &copies {
                 tx.execute("DELETE FROM messages WHERE id = ?", [c.id])?;
             }
             for (path, uids) in &by_path {
-                Store::enqueue_op_tx(tx, account_id, &Op::Move { mailbox_path: path.clone(), uids: uids.clone(), target: target.clone() })?;
+                Store::enqueue_op_tx(tx, account_id, &Op::Move { mailbox_path: path.clone(), uids: uids.clone(), target: target.to_string() })?;
             }
             Ok(())
         })?;

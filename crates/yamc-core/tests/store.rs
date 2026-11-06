@@ -64,6 +64,12 @@ fn threads_unread_first_and_search() {
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].thread_id, rows[1].thread_id);
     assert!(s.list_threads(&View::Search("\"unbalanced".into()), 0, 10).is_empty());
+    // Field filters.
+    assert_eq!(s.list_threads(&View::Search("from:p4".into()), 0, 10).len(), 1);
+    assert_eq!(s.list_threads(&View::Search("from:person".into()), 0, 10).len(), 2);
+    assert!(s.list_threads(&View::Search("subject:rame".into()), 0, 10).is_empty());
+    assert_eq!(s.list_threads(&View::Search("body:rame from:person".into()), 0, 10).len(), 1);
+    assert_eq!(s.list_threads(&View::Search("unknown:rame".into()), 0, 10).len(), 0);
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -88,5 +94,10 @@ fn lists_100k_messages_fast() {
     assert_eq!(rows.len(), 300);
     assert!(rows[0].unread);
     assert!(again.as_millis() < 200, "listing took {again:?}");
+    // Search runs on every keystroke, so even a one-letter prefix matching everything must be quick.
+    let t = Instant::now();
+    let hits = s.list_threads(&View::Search("s".into()), 0, 100);
+    eprintln!("search 's' over 100k: {:?}", t.elapsed());
+    assert_eq!(hits.len(), 100);
     let _ = std::fs::remove_dir_all(dir);
 }

@@ -217,6 +217,8 @@ pub struct Copy {
     pub special_use: Option<String>,
     pub uid: u32,
     pub seen: bool,
+    /// Message-ID, or the row id when there is none: the same mail in several folders shares it.
+    pub message_key: String,
 }
 
 #[derive(Clone, Debug)]
@@ -235,13 +237,31 @@ fn addr_text(list: &[Address]) -> String {
         .join(" ")
 }
 
-/// Turn free text into a safe FTS5 query: every word becomes a quoted prefix term.
+/// Turn free text into a safe FTS5 query: every word becomes a quoted prefix term, and
+/// `from:` / `to:` / `cc:` / `subject:` / `body:` scope a word to that field.
 pub fn fts_query(input: &str) -> String {
     input
         .split_whitespace()
-        .map(|t| t.replace('"', ""))
-        .filter(|t| !t.is_empty())
-        .map(|t| format!("\"{t}\"*"))
+        .filter_map(|t| {
+            let (col, word) = match t.split_once(':') {
+                Some((k, w)) => match k.to_lowercase().as_str() {
+                    "from" => (Some("sender"), w),
+                    "to" | "cc" => (Some("recipients"), w),
+                    "subject" | "s" => (Some("subject"), w),
+                    "body" => (Some("body"), w),
+                    _ => (None, t),
+                },
+                None => (None, t),
+            };
+            let word = word.replace('"', "");
+            if word.is_empty() {
+                return None;
+            }
+            Some(match col {
+                Some(c) => format!("{c}:\"{word}\"*"),
+                None => format!("\"{word}\"*"),
+            })
+        })
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -842,12 +862,12 @@ impl Store {
         let c = self.r();
         let mut st = c
             .prepare_cached(
-                "SELECT m.id, m.mailbox_id, b.path, b.special_use, m.uid, m.seen FROM messages m
+                "SELECT m.id, m.mailbox_id, b.path, b.special_use, m.uid, m.seen, COALESCE(m.message_id, CAST(m.id AS TEXT)) FROM messages m
                  JOIN mailboxes b ON b.id = m.mailbox_id WHERE m.account_id = ? AND m.thread_id = ?",
             )
             .expect("copies");
         st.query_map(params![account_id, thread_id], |r| {
-            Ok(Copy { id: r.get(0)?, mailbox_id: r.get(1)?, path: r.get(2)?, special_use: r.get(3)?, uid: r.get(4)?, seen: r.get(5)? })
+            Ok(Copy { id: r.get(0)?, mailbox_id: r.get(1)?, path: r.get(2)?, special_use: r.get(3)?, uid: r.get(4)?, seen: r.get(5)?, message_key: r.get(6)? })
         })
         .expect("copies")
         .flatten()

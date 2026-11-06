@@ -383,6 +383,7 @@ impl Render for ThreadView {
                             .child(hint(&["J", "K"], "next / prev"))
                             .child(hint(&["r"], "reply"))
                             .child(hint(&["e"], "archive"))
+                            .child(hint(&["#"], "delete"))
                             .child(hint(&["i"], "images"))
                             .child(hint(&["q"], "back"))
                             .child(hint(&["?"], "all keys")),

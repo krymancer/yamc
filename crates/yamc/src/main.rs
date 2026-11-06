@@ -1,6 +1,7 @@
 //! yamc: a fast, local-first, keyboard-driven mail client.
 
 mod app;
+mod menus;
 mod body;
 mod composer;
 mod format;
@@ -17,7 +18,7 @@ gpui_kit::assets::icon_assets!(
     Icons,
     [
         Inbox, FilePen, Settings, ChevronRight, ChevronDown, Search, SearchX, Reply, ReplyAll, Paperclip, Image, Copy, Check,
-        Plus, Trash, ArrowLeft, Info, X
+        Plus, Trash, ArrowLeft, Info, X, Archive, SquarePen, Mail
     ]
 );
 
@@ -41,6 +42,7 @@ fn main() {
     let ui_core = core.clone();
     gpui_kit::application().with_assets(Icons).run(move |cx| {
         gpui_kit::init(cx);
+        menus::install(cx);
         let s = ui_core.get_settings();
         theme::apply(theme::palette(&s.theme, &s.accent, theme::system_dark(None, cx)), None, cx);
         cx.on_window_closed(|cx, _| {
@@ -52,7 +54,13 @@ fn main() {
         let bounds = Bounds::centered(None, size(px(1240.), px(820.)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
-            titlebar: Some(TitlebarOptions { title: Some("yamc".into()), ..Default::default() }),
+            // No system title bar: the sidebar and top bar draw it, with the window buttons inset.
+            titlebar: Some(TitlebarOptions {
+                title: Some("yamc".into()),
+                appears_transparent: true,
+                traffic_light_position: Some(point(px(18.), px(19.))),
+            }),
+            app_owns_titlebar_drag: true,
             app_id: Some("yamc".into()),
             window_min_size: Some(size(px(640.), px(420.))),
             ..Default::default()

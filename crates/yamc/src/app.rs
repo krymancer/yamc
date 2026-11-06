@@ -16,6 +16,7 @@ use crate::body::Images;
 use crate::composer::{Composer, ComposerEvent};
 use crate::format::short_date;
 use crate::keys::{BINDINGS, Cmd, Feed, KeyEngine, Mode, key_token, pretty};
+use crate::menus;
 use crate::list::{PAGE, ROW, Screen as ScreenPos, ThreadList};
 use crate::settings::SettingsView;
 use crate::theme::{self, Palette};
@@ -26,6 +27,11 @@ enum Screen {
     View(View),
     Settings,
 }
+
+/// Height of the top bar, which doubles as the window's title bar.
+const TITLE_H: f32 = 52.;
+/// Room left of the title for the macOS window buttons.
+const TRAFFIC_LIGHTS_W: f32 = 84.;
 
 pub struct Yamc {
     core: Arc<Core>,
@@ -44,11 +50,14 @@ pub struct Yamc {
     search: Entity<InputState>,
     expanded: HashSet<i64>,
     sidebar: bool,
+    /// Mouse is down on a title-bar area; the next move drags the window.
+    drag_armed: bool,
     help: bool,
     visual: bool,
     engine: KeyEngine,
     pending: String,
     key_timer: Option<Task<()>>,
+    search_timer: Option<Task<()>>,
     toast: Option<String>,
     toast_timer: Option<Task<()>>,
     images: Images,
@@ -59,14 +68,22 @@ pub struct Yamc {
 impl Yamc {
     pub fn new(core: Arc<Core>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search mail"));
-        let sub = cx.subscribe_in(&search, window, |this: &mut Self, input, e: &InputEvent, window, cx| {
-            if let InputEvent::PressEnter { .. } = e {
+        let sub = cx.subscribe_in(&search, window, |this: &mut Self, input, e: &InputEvent, window, cx| match e {
+            // Results follow every keystroke; a short pause batches fast typing.
+            InputEvent::Change => {
                 let q = input.read(cx).value().trim().to_string();
-                if !q.is_empty() {
-                    this.go(Screen::View(View::Search(q)), cx);
-                    window.focus(&this.focus, cx);
-                }
+                this.search_timer = Some(cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(Duration::from_millis(50)).await;
+                    let _ = this.update(cx, |this, cx| this.live_search(q, cx));
+                }));
             }
+            InputEvent::PressEnter { .. } => {
+                let q = input.read(cx).value().trim().to_string();
+                this.search_timer = None;
+                this.live_search(q, cx);
+                window.focus(&this.focus, cx);
+            }
+            _ => {}
         });
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
@@ -107,11 +124,13 @@ impl Yamc {
             search,
             expanded: HashSet::new(),
             sidebar: true,
+            drag_armed: false,
             help: false,
             visual: false,
             engine: KeyEngine::default(),
             pending: String::new(),
             key_timer: None,
+            search_timer: None,
             toast: None,
             toast_timer: None,
             images: Images::default(),
@@ -182,7 +201,7 @@ impl Yamc {
     }
 
     fn load_more(&mut self, cx: &mut Context<Self>) {
-        if self.list.loading_more || self.list.exhausted {
+        if self.list.loading_more || self.list.exhausted || self.list.stale {
             return;
         }
         let Some(view) = self.current_view() else { return };
@@ -209,15 +228,31 @@ impl Yamc {
             cx.notify();
             return;
         }
+        let refine = matches!((&self.screen, &screen), (Screen::View(View::Search(_)), Screen::View(View::Search(_))));
         self.screen = screen;
         self.generation += 1;
-        self.list.reset();
+        if refine {
+            self.list.reset_keep_rows();
+        } else {
+            self.list.reset();
+        }
         self.visual = false;
         if self.screen != Screen::Settings {
             self.settings = None;
         }
         self.refresh(cx);
         cx.notify();
+    }
+
+    /// Show results for the search box's text; an empty box goes back to the inbox.
+    fn live_search(&mut self, q: String, cx: &mut Context<Self>) {
+        if q.is_empty() {
+            if matches!(self.screen, Screen::View(View::Search(_))) {
+                self.go(Screen::View(View::Inbox), cx);
+            }
+        } else {
+            self.go(Screen::View(View::Search(q)), cx);
+        }
     }
 
     fn close_thread(&mut self, cx: &mut Context<Self>) {
@@ -260,6 +295,14 @@ impl Yamc {
     fn archive(&mut self, row: &ThreadRow, cx: &mut Context<Self>) {
         self.list.remove_local(&row.key());
         if let Err(e) = self.core.archive_thread(row.account_id, &row.thread_id) {
+            self.notify_toast(format!("{e:#}"), cx);
+            self.refresh(cx);
+        }
+    }
+
+    fn trash(&mut self, row: &ThreadRow, cx: &mut Context<Self>) {
+        self.list.remove_local(&row.key());
+        if let Err(e) = self.core.trash_thread(row.account_id, &row.thread_id) {
             self.notify_toast(format!("{e:#}"), cx);
             self.refresh(cx);
         }
@@ -398,6 +441,16 @@ impl Yamc {
                 }
                 self.close_thread(cx);
             }
+            Cmd::Trash => {
+                let rows = self.targets();
+                for r in &rows {
+                    self.trash(r, cx);
+                }
+                if rows.len() > 1 {
+                    self.notify_toast(format!("Moved {} conversations to Trash", rows.len()), cx);
+                }
+                self.close_thread(cx);
+            }
             Cmd::MarkUnread => {
                 self.mark_rows(true, cx);
                 self.close_thread(cx);
@@ -472,6 +525,11 @@ impl Yamc {
         let typing = window.context_stack().iter().any(|c| c.contains("Input"));
         if typing {
             let search_focused = self.search.read(cx).focus_handle(cx).is_focused(window);
+            if matches!(k.key.as_str(), "down" | "tab") && search_focused {
+                window.focus(&self.focus, cx);
+                cx.stop_propagation();
+                return;
+            }
             if k.key == "escape" && search_focused {
                 window.focus(&self.focus, cx);
                 if matches!(self.screen, Screen::View(View::Search(_))) {
@@ -544,7 +602,51 @@ impl Yamc {
             .child(div().flex_1().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().child(label))
     }
 
+    /// Makes an element act as the window's title bar: drag to move, double-click to zoom.
+    fn title_drag(&self, d: Stateful<Div>, cx: &mut Context<Self>) -> Stateful<Div> {
+        d.on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, e: &MouseDownEvent, window, _| {
+                if e.click_count >= 2 {
+                    this.drag_armed = false;
+                    window.titlebar_double_click();
+                } else {
+                    this.drag_armed = true;
+                }
+            }),
+        )
+        .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| this.drag_armed = false))
+        .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, window, _| {
+            if this.drag_armed && e.pressed_button == Some(MouseButton::Left) {
+                this.drag_armed = false;
+                window.start_window_move();
+            } else if e.pressed_button.is_none() {
+                this.drag_armed = false;
+            }
+        }))
+    }
+
     fn render_sidebar(&self, pal: &Palette, cx: &mut Context<Self>) -> impl IntoElement {
+        let header = self.title_drag(h_flex().id("sidebar-title").h(px(TITLE_H)).flex_none().pl(px(TRAFFIC_LIGHTS_W)).pr_3().gap_2(), cx);
+        let compose = h_flex()
+            .id("compose")
+            .mx_2()
+            .mb_2()
+            .h(px(32.))
+            .px_2()
+            .gap_2()
+            .rounded_md()
+            .border_1()
+            .border_color(pal.line)
+            .bg(pal.card)
+            .text_sm()
+            .text_color(pal.strong)
+            .cursor_pointer()
+            .hover(|s| s.bg(pal.hover))
+            .on_click(cx.listener(|this, _, window, cx| this.new_message(window, cx)))
+            .child(Icon::new(IconName::SquarePen).size_4().text_color(pal.muted))
+            .child(div().flex_1().child("New message"))
+            .child(kbd("c", pal));
         let mut col = v_flex()
             .w(px(232.))
             .flex_none()
@@ -552,13 +654,10 @@ impl Yamc {
             .bg(pal.panel)
             .border_r_1()
             .border_color(pal.line)
-            .py_3()
+            .pb_3()
             .gap_0p5()
             .child(
-                h_flex()
-                    .px_4()
-                    .pb_3()
-                    .gap_2()
+                header
                     .child(
                         div()
                             .size(px(22.))
@@ -574,6 +673,7 @@ impl Yamc {
                     )
                     .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(pal.strong).child("yamc")),
             )
+            .child(compose)
             .child(
                 self.nav("nav-inbox", Some(IconName::Inbox), "Inbox".into(), self.screen == Screen::View(View::Inbox), pal)
                     .on_click(cx.listener(|this, _, _, cx| this.go(Screen::View(View::Inbox), cx))),
@@ -636,38 +736,82 @@ impl Yamc {
         )
     }
 
+    fn icon_button(&self, id: &'static str, icon: IconName, label: &'static str, key: &'static str, pal: &Palette) -> Stateful<Div> {
+        h_flex()
+            .id(id)
+            .h(px(28.))
+            .px_2()
+            .gap_1p5()
+            .rounded_md()
+            .text_sm()
+            .text_color(pal.muted)
+            .cursor_pointer()
+            .hover(|s| s.bg(pal.hover).text_color(pal.strong))
+            .child(Icon::new(icon).size_4())
+            .child(label)
+            .child(kbd(key, pal))
+    }
+
     fn render_topbar(&self, pal: &Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let title = self.title();
-        h_flex()
-            .h(px(52.))
-            .flex_none()
-            .px_5()
-            .gap_4()
-            .border_b_1()
-            .border_color(pal.line)
-            .child(if self.open_row.is_some() {
-                h_flex()
-                    .id("back")
-                    .gap_1()
-                    .text_sm()
-                    .text_color(pal.muted)
-                    .cursor_pointer()
-                    .hover(|s| s.text_color(pal.strong))
-                    .on_click(cx.listener(|this, _, _, cx| this.close_thread(cx)))
-                    .child(Icon::new(IconName::ArrowLeft).size_4())
-                    .child(title)
-                    .into_any_element()
-            } else {
-                div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(pal.strong).child(title).into_any_element()
-            })
-            .child(div().flex_1())
-            .child(
-                h_flex()
-                    .w(px(320.))
-                    .gap_2()
-                    .child(div().flex_1().child(Input::new(&self.search).small().prefix(Icon::new(IconName::Search).size_4().text_color(pal.faint))))
-                    .child(kbd("/", pal)),
-            )
+        let title_el = if self.open_row.is_some() {
+            h_flex()
+                .id("back")
+                .flex_none()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .gap_1()
+                .text_sm()
+                .text_color(pal.muted)
+                .cursor_pointer()
+                .hover(|s| s.text_color(pal.strong))
+                .on_click(cx.listener(|this, _, _, cx| this.close_thread(cx)))
+                .child(Icon::new(IconName::ArrowLeft).size_4())
+                .child(title)
+                .into_any_element()
+        } else {
+            div().flex_none().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(pal.strong).child(title).into_any_element()
+        };
+        let actions = self.open_row.is_some().then(|| {
+            h_flex()
+                .gap_1()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(
+                    self.icon_button("act-archive", IconName::Archive, "Archive", "e", pal)
+                        .on_click(cx.listener(|this, _, window, cx| this.run(Cmd::Archive, None, window, cx))),
+                )
+                .child(
+                    self.icon_button("act-trash", IconName::Trash, "Delete", "#", pal)
+                        .on_click(cx.listener(|this, _, window, cx| this.run(Cmd::Trash, None, window, cx))),
+                )
+                .child(
+                    self.icon_button("act-unread", IconName::Mail, "Unread", "U", pal)
+                        .on_click(cx.listener(|this, _, window, cx| this.run(Cmd::MarkUnread, None, window, cx))),
+                )
+        });
+        self.title_drag(
+            h_flex()
+                .id("topbar")
+                .h(px(TITLE_H))
+                .flex_none()
+                .pr_5()
+                .pl(px(if self.sidebar { 20. } else { TRAFFIC_LIGHTS_W }))
+                .gap_4()
+                .border_b_1()
+                .border_color(pal.line),
+            cx,
+        )
+        .child(title_el)
+        .children(actions)
+        .child(div().flex_1())
+        .child(
+            h_flex()
+                .w(px(320.))
+                .gap_2()
+                // Selecting text in the box must not drag the window.
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(div().flex_1().child(Input::new(&self.search).small().prefix(Icon::new(IconName::Search).size_4().text_color(pal.faint))))
+                .child(kbd("/", pal)),
+        )
     }
 
     fn render_row(&self, ix: usize, pal: &Palette, multi: bool, cx: &mut Context<Self>) -> AnyElement {
@@ -685,10 +829,9 @@ impl Yamc {
             .rounded_md()
             .text_sm()
             .cursor_pointer()
+            .group("row")
             .when(cursor, |d| d.bg(pal.active))
-            .when(selected && !cursor, |d| d.bg(pal.hover))
-            .when(!cursor && !selected, |d| d.hover(|s| s.bg(pal.hover)))
-            .when(selected, |d| d.border_l_2().border_color(pal.accent))
+            .when(!cursor, |d| d.hover(|s| s.bg(pal.hover)))
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
                 this.list.cursor = ix;
                 cx.notify();
@@ -740,9 +883,50 @@ impl Yamc {
                     .text_right()
                     .text_xs()
                     .text_color(if r.unread { pal.text } else { pal.faint })
+                    .group_hover("row", |s| s.invisible())
                     .child(short_date(r.date)),
-            );
-        div().w_full().px_2().child(inner).into_any_element()
+            )
+            .child({
+                let (a, t) = (r.clone(), r.clone());
+                let act = |id: (&'static str, usize), icon: IconName, pal: &Palette| {
+                    div()
+                        .id(id)
+                        .size(px(26.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_md()
+                        .text_color(pal.muted)
+                        .hover(|s| s.bg(pal.line).text_color(pal.strong))
+                        .child(Icon::new(icon).size_4())
+                };
+                h_flex()
+                    .absolute()
+                    .right_2()
+                    .top_0()
+                    .h_full()
+                    .gap_0p5()
+                    .invisible()
+                    .group_hover("row", |s| s.visible())
+                    .child(act(("row-archive", ix), IconName::Archive, pal).on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.archive(&a, cx);
+                        cx.notify();
+                    })))
+                    .child(act(("row-trash", ix), IconName::Trash, pal).on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.trash(&t, cx);
+                        cx.notify();
+                    })))
+            });
+        // Selection is a flat bar in the gutter; consecutive rows join into one line.
+        div()
+            .w_full()
+            .px_2()
+            .relative()
+            .when(selected, |d| d.child(div().absolute().left_0().top_0().bottom_0().w(px(3.)).bg(pal.accent)))
+            .child(inner.relative())
+            .into_any_element()
     }
 
     fn empty(icon: IconName, title: &'static str, body: &'static str, pal: &Palette) -> AnyElement {
@@ -944,6 +1128,21 @@ impl Render for Yamc {
             .key_context("Yamc")
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
+            .on_action(cx.listener(|this, _: &menus::NewMessage, w, cx| this.run(Cmd::Compose, None, w, cx)))
+            .on_action(cx.listener(|this, _: &menus::OpenSettings, w, cx| this.run(Cmd::GoSettings, None, w, cx)))
+            .on_action(cx.listener(|this, _: &menus::FocusSearch, w, cx| this.run(Cmd::Search, None, w, cx)))
+            .on_action(cx.listener(|this, _: &menus::GoInbox, w, cx| this.run(Cmd::GoInbox, None, w, cx)))
+            .on_action(cx.listener(|this, _: &menus::GoDrafts, w, cx| this.run(Cmd::GoDrafts, None, w, cx)))
+            .on_action(cx.listener(|this, _: &menus::Archive, w, cx| this.run(Cmd::Archive, None, w, cx)))
+            .on_action(cx.listener(|this, _: &menus::Trash, w, cx| this.run(Cmd::Trash, None, w, cx)))
+            .on_action(cx.listener(|this, _: &menus::MarkUnread, w, cx| this.run(Cmd::MarkUnread, None, w, cx)))
+            .on_action(cx.listener(|this, _: &menus::MarkRead, w, cx| this.run(Cmd::MarkRead, None, w, cx)))
+            .on_action(cx.listener(|this, _: &menus::Reply, w, cx| this.run(Cmd::Reply, None, w, cx)))
+            .on_action(cx.listener(|this, _: &menus::ReplyAll, w, cx| this.run(Cmd::ReplyAll, None, w, cx)))
+            .on_action(cx.listener(|this, _: &menus::ToggleSidebar, w, cx| this.run(Cmd::ToggleSidebar, None, w, cx)))
+            .on_action(cx.listener(|this, _: &menus::ShowKeys, w, cx| this.run(Cmd::Help, None, w, cx)))
+            .on_action(|_: &menus::Minimize, w, _| w.minimize_window())
+            .on_action(|_: &menus::Zoom, w, _| w.zoom_window())
             .size_full()
             .relative()
             .bg(pal.bg)

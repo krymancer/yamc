@@ -37,9 +37,9 @@ Then copy the Claude Code command or Codex config from Settings → MCP.
 Vim-style, with counts (`5j`, `3J`). Press `?` in the app for the full list.
 
 - **List:** `j`/`k`, `gg`/`G`, `ctrl-d`/`ctrl-u`, `ctrl-f`/`ctrl-b`, `H`/`M`/`L`, `zz`/`zt`/`zb`, `enter`/`o`/`l` open
-- **Select:** `x` toggle, `V` visual range, then `e`/`dd` archive, `U` unread, `I` read, `esc` clear
-- **Reading:** `j`/`k` scroll, `ctrl-d`/`ctrl-u`, `gg`/`G`, `J`/`K` next/prev conversation, `r`/`a` reply/all, `e` archive, `i` images, `O` open original in browser, `q`/`h`/`esc` back
-- **Anywhere:** `c` compose, `/` search, `g i` inbox, `g d` drafts, `g s` settings, `\` sidebar
+- **Select:** `x` toggle, `V` visual range, then `e`/`dd` archive, `#` delete, `U` unread, `I` read, `esc` clear
+- **Reading:** `j`/`k` scroll, `ctrl-d`/`ctrl-u`, `gg`/`G`, `J`/`K` next/prev conversation, `r`/`a` reply/all, `e` archive, `#` delete, `i` images, `O` open original in browser, `q`/`h`/`esc` back
+- **Anywhere:** `c` compose, `/` search (live; `from:` `to:` `cc:` `subject:` `body:` narrow a word), `g i` inbox, `g d` drafts, `g s` settings, `\` sidebar
 
 ## Test
 

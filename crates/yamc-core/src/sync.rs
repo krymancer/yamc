@@ -1,5 +1,6 @@
-//! One worker per account: a command connection that runs queued tasks (urgent first), plus an
-//! IDLE connection that watches INBOX and pokes the worker when something changes.
+//! One worker per account: a command connection that runs queued tasks (urgent first), an IDLE
+//! connection that watches INBOX and pokes the worker when something changes, and a reader
+//! connection that only fetches bodies you open, so opening mail never waits behind a sync.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,7 +37,6 @@ enum Task {
     FullSync,
     SyncMailbox(i64),
     FlushOps,
-    FetchBody(i64),
     Backfill,
 }
 
@@ -56,6 +56,9 @@ struct Inner {
     stopped: AtomicBool,
     state: Mutex<(SyncState, Option<String>)>,
     waiters: Mutex<HashMap<i64, Vec<oneshot::Sender<bool>>>>,
+    /// Bodies asked for by the UI, served by the reader connection.
+    wanted: Mutex<VecDeque<i64>>,
+    wanted_notify: Notify,
     failed_bodies: Mutex<HashSet<i64>>,
 }
 
@@ -175,17 +178,21 @@ impl AccountSync {
             stopped: AtomicBool::new(false),
             state: Mutex::new((SyncState::Idle, None)),
             waiters: Mutex::default(),
+            wanted: Mutex::default(),
+            wanted_notify: Notify::new(),
             failed_bodies: Mutex::default(),
         });
         inner.push(false, Task::FullSync);
         let worker = tokio::spawn(inner.clone().worker());
         let idle = tokio::spawn(inner.clone().idle_watch());
-        Self { inner, tasks: vec![worker, idle] }
+        let reader = tokio::spawn(inner.clone().reader());
+        Self { inner, tasks: vec![worker, idle, reader] }
     }
 
     pub fn stop(&self) {
         self.inner.stopped.store(true, Ordering::SeqCst);
         self.inner.notify.notify_one();
+        self.inner.wanted_notify.notify_one();
         for t in &self.tasks {
             t.abort();
         }
@@ -210,7 +217,8 @@ impl AccountSync {
             list.len() == 1
         };
         if first {
-            self.inner.push(true, Task::FetchBody(message_id));
+            self.inner.wanted.lock().unwrap().push_back(message_id);
+            self.inner.wanted_notify.notify_one();
         }
         rx
     }
@@ -255,13 +263,6 @@ impl Inner {
             for tx in list {
                 let _ = tx.send(ok);
             }
-        }
-    }
-
-    fn fail_all_waiters(&self) {
-        let ids: Vec<i64> = self.waiters.lock().unwrap().keys().copied().collect();
-        for id in ids {
-            self.resolve(id, false);
         }
     }
 
@@ -320,7 +321,6 @@ impl Inner {
                     log(&self.account, format!("{task:?} failed: {e:#}"));
                     conn = None;
                     self.set_state(SyncState::Error, Some(format!("{e:#}")));
-                    self.fail_all_waiters();
                     *self.queues.lock().unwrap() = Queues::default();
                     retry_at = Some(Instant::now() + retry);
                     retry = (retry * 2).min(Duration::from_secs(300));
@@ -338,15 +338,50 @@ impl Inner {
             Task::SyncMailbox(id) => self.sync_mailbox(c, id).await,
             Task::FlushOps => self.flush_ops(c).await,
             Task::Backfill => self.backfill(c).await,
-            Task::FetchBody(id) => {
-                let ok = match self.store.message_location(id) {
-                    Some(loc) if loc.has_body => true,
-                    Some(loc) => self.fetch_bodies(c, &loc.path, &[(loc.id, loc.uid)]).await? > 0,
-                    None => false,
-                };
-                self.resolve(id, ok);
-                Ok(())
+        }
+    }
+
+    /// Serves `request_body` on its own connection, kept open between requests.
+    async fn reader(self: Arc<Self>) {
+        let mut conn: Option<Conn> = None;
+        while !self.stopped.load(Ordering::SeqCst) {
+            let next = self.wanted.lock().unwrap().pop_front();
+            let Some(id) = next else {
+                self.wanted_notify.notified().await;
+                continue;
+            };
+            let loc = match self.store.message_location(id) {
+                Some(loc) if !loc.has_body => loc,
+                other => {
+                    self.resolve(id, other.is_some());
+                    continue;
+                }
+            };
+            let mut result = Err(anyhow!("not tried"));
+            // A connection the server dropped while parked gets one retry on a fresh one.
+            for _ in 0..2 {
+                if conn.is_none() {
+                    match self.connect().await {
+                        Ok(c) => conn = Some(c),
+                        Err(e) => {
+                            result = Err(e);
+                            break;
+                        }
+                    }
+                }
+                result = self.fetch_bodies(conn.as_mut().unwrap(), &loc.path, &[(loc.id, loc.uid)]).await;
+                if result.is_ok() {
+                    break;
+                }
+                conn = None;
             }
+            if let Err(e) = &result {
+                log(&self.account, format!("body {id}: {e:#}"));
+            }
+            self.resolve(id, result.is_ok_and(|n| n > 0));
+        }
+        if let Some(mut c) = conn {
+            let _ = c.session.logout().await;
         }
     }
 
@@ -360,7 +395,7 @@ impl Inner {
             if self.stopped.load(Ordering::SeqCst) {
                 return Ok(());
             }
-            // Opening a message mid-sync shouldn't wait for the whole account.
+            // Local changes (archive, mark read) shouldn't wait for the whole account.
             while let Some(t) = self.take_urgent() {
                 Box::pin(self.run(c, t)).await?;
             }
