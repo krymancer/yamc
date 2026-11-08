@@ -28,7 +28,27 @@ jobs:
 
       - run: cargo test --locked -p yamc-core --lib --test store
 
+      # Sign with the release certificate so updates keep one identity (Keychain access sticks)
+      # and the in-app updater accepts them. It's self-made, so macOS doesn't need to trust it.
+      - name: Load signing certificate
+        env:
+          P12: ${{ secrets.MACOS_SIGNING_P12 }}
+          P12_PASSWORD: ${{ secrets.MACOS_SIGNING_PASSWORD }}
+        run: |
+          kc="$RUNNER_TEMP/signing.keychain-db"
+          kc_pass=$(openssl rand -hex 16)
+          echo "$P12" | base64 --decode > "$RUNNER_TEMP/signing.p12"
+          security create-keychain -p "$kc_pass" "$kc"
+          security set-keychain-settings -lut 21600 "$kc"
+          security unlock-keychain -p "$kc_pass" "$kc"
+          security import "$RUNNER_TEMP/signing.p12" -k "$kc" -P "$P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$kc_pass" "$kc" >/dev/null
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | xargs)
+          rm "$RUNNER_TEMP/signing.p12"
+
       - run: scripts/bundle-macos.sh
+        env:
+          SIGN_IDENTITY: 45E72C5F7F55C6F323D6C533AF45C3BCF0F7D773
 
       - name: Publish
         env:

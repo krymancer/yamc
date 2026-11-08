@@ -13,6 +13,9 @@ use tokio::runtime::Handle;
 const REPO: &str = "krymancer/yamc";
 const ASSET: &str = "yamc-macos.zip";
 const BUNDLE_ID: &str = "dev.yamc.app";
+/// SHA-1 of the release signing certificate ("yamc release signing", self-made, kept in the
+/// repo's Actions secrets). Updates signed with anything else are refused.
+const SIGNING_CERT: &str = "45E72C5F7F55C6F323D6C533AF45C3BCF0F7D773";
 const FIRST_CHECK: Duration = Duration::from_secs(10);
 const EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 
@@ -203,7 +206,9 @@ fn check_bundle(app: &Path) -> Result<()> {
     if String::from_utf8_lossy(&out.stdout).trim() != BUNDLE_ID {
         bail!("download isn't yamc ({})", BUNDLE_ID);
     }
-    run(Command::new("/usr/bin/codesign").args(["--verify", "--deep", "--strict"]).arg(app)).context("signature check failed")
+    let requirement = format!("=identifier \"{BUNDLE_ID}\" and certificate leaf = H\"{SIGNING_CERT}\"");
+    run(Command::new("/usr/bin/codesign").args(["--verify", "--deep", "--strict", "-R"]).arg(requirement).arg(app))
+        .context("download isn't signed with yamc's release certificate")
 }
 
 fn run(cmd: &mut Command) -> Result<()> {

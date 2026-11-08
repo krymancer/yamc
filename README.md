@@ -19,13 +19,18 @@ curl -fL https://github.com/krymancer/yamc/releases/latest/download/yamc-macos.z
   && ditto -x -k /tmp/yamc.zip /Applications && open /Applications/yamc.app
 ```
 
-Installing from Terminal avoids Gatekeeper's warning about an app downloaded with a browser. The release isn't signed
-with an Apple Developer ID. If you download the zip in a browser instead, open the app once from System Settings →
-Privacy & Security → Open Anyway.
+Installing from Terminal avoids Gatekeeper's warning about an app downloaded with a browser. Releases are signed
+with a self-made certificate, not an Apple Developer ID. If you download the zip in a browser instead, open the app
+once from System Settings → Privacy & Security → Open Anyway.
 
 yamc updates itself: it checks GitHub releases at launch and every 6 hours, installs a newer version in the background,
-then the sidebar shows **Restart to update**. yamc → Check for Updates… checks right away. macOS may ask once more for
-Keychain access after an update; choose Always Allow.
+then the sidebar shows **Restart to update**. yamc → Check for Updates… checks right away. It only installs builds
+signed with the release certificate. Every release carries the same signature, so after you choose Always Allow
+once, macOS stops asking for Keychain access on updates.
+
+The certificate's private key lives in the `MACOS_SIGNING_P12` and `MACOS_SIGNING_PASSWORD` Actions secrets, and
+a backup is kept in the maintainer's login keychain. If it's ever replaced, update `SIGNING_CERT` in
+`crates/yamc/src/update.rs` and the identity in the release workflow; installed copies then need a manual reinstall.
 
 To publish a release, run `scripts/release.sh 0.2.0` on a clean tree. It bumps the version, tags `v0.2.0` and pushes,
 and `.github/workflows/release.yml` builds the universal app and attaches `yamc-macos.zip` to the release.
