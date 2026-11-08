@@ -401,6 +401,33 @@ impl Store {
         Ok(())
     }
 
+    /// Every address in a From, plus every To/Cc of mail you sent, for the address book.
+    pub fn contact_sightings(&self) -> Vec<crate::contacts::Seen> {
+        let c = self.r();
+        let mut st = c
+            .prepare_cached(
+                "SELECT from_addr, from_name, date, 0 FROM messages WHERE from_addr IS NOT NULL AND from_addr != ''
+                 UNION ALL
+                 SELECT json_extract(j.value, '$.address'), json_extract(j.value, '$.name'), m.date, 1
+                   FROM messages m JOIN mailboxes b ON b.id = m.mailbox_id, json_each(m.to_json) j WHERE b.special_use = ?1
+                 UNION ALL
+                 SELECT json_extract(j.value, '$.address'), json_extract(j.value, '$.name'), m.date, 1
+                   FROM messages m JOIN mailboxes b ON b.id = m.mailbox_id, json_each(m.cc_json) j WHERE b.special_use = ?1",
+            )
+            .expect("contacts");
+        st.query_map([SENT], |r| {
+            Ok(crate::contacts::Seen {
+                address: r.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                name: r.get(1)?,
+                date: r.get(2)?,
+                sent_to: r.get::<_, i64>(3)? == 1,
+            })
+        })
+        .expect("contacts")
+        .flatten()
+        .collect()
+    }
+
     /// The name this address usually sends under, taken from synced mail (mostly the Sent
     /// folder). The most frequent one wins, so one odd message doesn't change it.
     pub fn inferred_sender_name(&self, account_id: i64, email: &str) -> Option<String> {

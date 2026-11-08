@@ -5,13 +5,14 @@
 use std::sync::Arc;
 
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
+use gpui_kit::component::input::{self, Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::{Icon, Sizable, h_flex, v_flex};
 use gpui_kit::assets::IconName;
 use gpui_kit::*;
 use gpui_kit::prelude::*;
 use yamc_core::core::Core;
-use yamc_core::types::{Account, DraftInput};
+use yamc_core::contacts;
+use yamc_core::types::{Account, Address, DraftInput};
 
 use crate::theme::Palette;
 
@@ -23,6 +24,29 @@ pub enum ComposerEvent {
 
 impl EventEmitter<ComposerEvent> for Composer {}
 
+#[derive(Clone, Copy, PartialEq)]
+enum Field {
+    To,
+    Cc,
+}
+
+/// Address suggestions for the entry being typed in To or Cc.
+struct Suggest {
+    field: Field,
+    items: Vec<Address>,
+    selected: usize,
+}
+
+const SUGGESTIONS: usize = 6;
+
+#[derive(Clone, Copy, PartialEq)]
+enum Nav {
+    Next,
+    Prev,
+    Accept,
+    Dismiss,
+}
+
 pub struct Composer {
     core: Arc<Core>,
     draft: DraftInput,
@@ -33,6 +57,10 @@ pub struct Composer {
     body: Entity<TextareaState>,
     error: Option<String>,
     focus: FocusHandle,
+    /// Address book, loaded in the background when the composer opens.
+    contacts: Arc<Vec<Address>>,
+    suggest: Option<Suggest>,
+    _subs: Vec<Subscription>,
 }
 
 impl Composer {
@@ -52,7 +80,137 @@ impl Composer {
         if draft.reply_to.is_some() {
             body.update(cx, |b, cx| b.set_cursor_position(gpui_kit::component::input::Position::new(0, 0), window, cx));
         }
-        Self { core, draft, accounts, to, cc, subject, body, error: None, focus: cx.focus_handle() }
+        let watch = |input: &Entity<InputState>, field: Field, cx: &mut Context<Self>| {
+            cx.subscribe(input, move |this: &mut Self, _, e: &InputEvent, cx| {
+                if matches!(e, InputEvent::Change) {
+                    this.refresh_suggest(field, cx);
+                }
+            })
+        };
+        let subs = vec![watch(&to, Field::To, cx), watch(&cc, Field::Cc, cx)];
+        let book = {
+            let core = core.clone();
+            core.runtime().clone().spawn_blocking(move || core.contacts())
+        };
+        cx.spawn(async move |this, cx| {
+            if let Ok(list) = book.await {
+                let _ = this.update(cx, |this, _| this.contacts = Arc::new(list));
+            }
+        })
+        .detach();
+        Self {
+            core,
+            draft,
+            accounts,
+            to,
+            cc,
+            subject,
+            body,
+            error: None,
+            focus: cx.focus_handle(),
+            contacts: Arc::default(),
+            suggest: None,
+            _subs: subs,
+        }
+    }
+
+    fn input(&self, field: Field) -> &Entity<InputState> {
+        match field {
+            Field::To => &self.to,
+            Field::Cc => &self.cc,
+        }
+    }
+
+    /// Suggest contacts for the entry after the last comma, leaving out ones already added.
+    fn refresh_suggest(&mut self, field: Field, cx: &mut Context<Self>) {
+        let text = self.input(field).read(cx).value().to_string();
+        let (done, typing) = text.rsplit_once([',', ';']).unwrap_or(("", &text));
+        let skip: Vec<String> = done.split([',', ';']).map(|e| contacts::address_of(e).to_string()).collect();
+        let items: Vec<Address> = contacts::matches(&self.contacts, typing, &skip, SUGGESTIONS).into_iter().cloned().collect();
+        self.suggest = (!items.is_empty()).then_some(Suggest { field, items, selected: 0 });
+        cx.notify();
+    }
+
+    /// Replace the entry being typed with the picked contact and get ready for the next one.
+    fn accept_suggestion(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(s) = self.suggest.take() else { return };
+        let Some(pick) = s.items.get(index) else { return };
+        let input = self.input(s.field).clone();
+        let text = input.read(cx).value().to_string();
+        let done = text.rfind([',', ';']).map(|i| text[..=i].trim_end().to_string() + " ").unwrap_or_default();
+        let value = format!("{done}{}, ", contacts::recipient(pick));
+        input.update(cx, |state, cx| state.set_value(value, window, cx));
+        window.focus(&input.read(cx).focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    /// The suggestions to show: only while their field has focus.
+    fn visible_suggest(&self, window: &Window, cx: &App) -> Option<&Suggest> {
+        self.suggest.as_ref().filter(|s| self.input(s.field).read(cx).focus_handle(cx).is_focused(window))
+    }
+
+    /// ↑/↓ (or ctrl-p/n) move, Enter or Tab accepts, Esc dismisses. Returns whether the
+    /// suggestions were showing and took the key.
+    fn suggest_nav(&mut self, nav: Nav, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(len) = self.visible_suggest(window, cx).map(|s| s.items.len()) else { return false };
+        match nav {
+            Nav::Next | Nav::Prev => {
+                if let Some(s) = self.suggest.as_mut() {
+                    s.selected = (s.selected + if nav == Nav::Next { 1 } else { len - 1 }) % len;
+                }
+            }
+            Nav::Accept => {
+                let i = self.suggest.as_ref().map_or(0, |s| s.selected);
+                self.accept_suggestion(i, window, cx);
+            }
+            Nav::Dismiss => self.suggest = None,
+        }
+        cx.notify();
+        true
+    }
+
+    fn take(&mut self, nav: Nav, window: &mut Window, cx: &mut Context<Self>) {
+        if self.suggest_nav(nav, window, cx) {
+            cx.stop_propagation();
+        }
+    }
+
+    fn render_suggest(&self, field: Field, pal: &Palette, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let s = self.visible_suggest(window, cx).filter(|s| s.field == field)?;
+        let list = v_flex()
+            .absolute()
+            .top(px(34.))
+            .left(px(84.))
+            .w(px(440.))
+            .py_1()
+            .bg(pal.card)
+            .border_1()
+            .border_color(pal.line)
+            .rounded_md()
+            .shadow_lg()
+            .occlude()
+            .children(s.items.iter().enumerate().map(|(i, a)| {
+                let on = i == s.selected;
+                h_flex()
+                    .id(("suggest", i))
+                    .px_3()
+                    .py_1()
+                    .gap_2()
+                    .text_sm()
+                    .cursor_pointer()
+                    .when(on, |d| d.bg(pal.active))
+                    .when(!on, |d| d.hover(|d| d.bg(pal.hover)))
+                    .when_some(a.name.clone(), |d, n| d.child(div().text_color(pal.strong).whitespace_nowrap().child(n)))
+                    .child(div().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().text_color(pal.muted).child(a.address.clone()))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.accept_suggestion(i, window, cx);
+                        }),
+                    )
+            }));
+        Some(deferred(list).with_priority(1).into_any_element())
     }
 
     fn current(&self, cx: &App) -> DraftInput {
@@ -249,7 +407,7 @@ impl Focusable for Composer {
 }
 
 impl Render for Composer {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = cx.global::<Palette>().clone();
         let from = self
             .accounts
@@ -270,9 +428,17 @@ impl Render for Composer {
         v_flex()
             .track_focus(&self.focus)
             .key_context("Composer")
-            .capture_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
+            .capture_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| {
                 let k = &e.keystroke;
-                if k.key == "enter" && (k.modifiers.control || k.modifiers.platform) {
+                let emacs = k.modifiers.control && !k.modifiers.platform && !k.modifiers.alt;
+                let nav = match k.key.as_str() {
+                    "n" if emacs => Some(Nav::Next),
+                    "p" if emacs => Some(Nav::Prev),
+                    _ => None,
+                };
+                if nav.is_some_and(|n| this.suggest_nav(n, window, cx)) {
+                    cx.stop_propagation();
+                } else if k.key == "enter" && (k.modifiers.control || k.modifiers.platform) {
                     cx.stop_propagation();
                     this.send(cx);
                 } else if k.key == "escape" {
@@ -280,6 +446,17 @@ impl Render for Composer {
                     this.close(cx);
                 }
             }))
+            // The text field binds ↑/↓, Enter, Tab and Esc to its own actions, which run before key
+            // listeners; take them while suggestions are showing.
+            .capture_action(cx.listener(|this, _: &input::MoveDown, window, cx| this.take(Nav::Next, window, cx)))
+            .capture_action(cx.listener(|this, _: &input::MoveUp, window, cx| this.take(Nav::Prev, window, cx)))
+            .capture_action(cx.listener(|this, _: &input::IndentInline, window, cx| this.take(Nav::Accept, window, cx)))
+            .capture_action(cx.listener(|this, e: &input::Enter, window, cx| {
+                if !e.secondary && !e.shift {
+                    this.take(Nav::Accept, window, cx);
+                }
+            }))
+            .capture_action(cx.listener(|this, _: &input::Escape, window, cx| this.take(Nav::Dismiss, window, cx)))
             // Paste arrives as an action (from ⌘V or Edit > Paste); take it before the text field
             // does when the clipboard holds an image or files, otherwise let text paste as usual.
             .capture_action(cx.listener(|this, _: &gpui_kit::component::input::Paste, _, cx| {
@@ -324,8 +501,8 @@ impl Render for Composer {
                     .child(from)
                     .into_any_element(),
             ))
-            .child(row("To", Input::new(&self.to).appearance(false).small().into_any_element()))
-            .child(row("Cc", Input::new(&self.cc).appearance(false).small().into_any_element()))
+            .child(row("To", Input::new(&self.to).appearance(false).small().into_any_element()).relative().children(self.render_suggest(Field::To, &pal, window, cx)))
+            .child(row("Cc", Input::new(&self.cc).appearance(false).small().into_any_element()).relative().children(self.render_suggest(Field::Cc, &pal, window, cx)))
             .child(row("Subject", Input::new(&self.subject).appearance(false).small().into_any_element()))
             .child(div().flex_1().min_h_0().px_2().py_2().child(Textarea::new(&self.body).appearance(false).h_full()))
             .children(self.render_attachments(&pal, cx))

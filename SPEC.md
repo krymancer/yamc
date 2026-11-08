@@ -60,6 +60,13 @@ Passwords are sealed with AES-256-GCM using a key kept in the OS keychain (`secr
 - **Account → folder:** the same list scoped to one mailbox.
 - **Search:** live as you type. FTS prefix match over subject, from, to/cc, and cached bodies, across all accounts; `from:`, `to:`, `cc:`, `subject:`, `body:` scope a word to one field.
 - **Conversation:** Gmail-style stacked messages, latest expanded.
+- **Sent:** conversations with a message in any account's Sent folder, labelled "To: …".
+
+## Composing
+
+- Send checks recipients and attachment size, saves a draft, closes the composer and sends in the background. Success deletes the draft; a failure leaves it in Drafts and says why.
+- To/Cc autocomplete from an address book built from synced mail: people you've sent to rank above people who wrote to you, then by count and recency. Your own addresses and no-reply senders are left out.
+- Attachments: Attach button, drop files, or paste (images are saved as files). 25 MB per message.
 
 ## Email rendering
 
@@ -86,6 +93,7 @@ Passwords are sealed with AES-256-GCM using a key kept in the OS keychain (`secr
 | `c` | compose |
 | `/` | search |
 | `g i` | shared inbox |
+| `g t` | sent |
 | `i` | load images |
 | `O` | open original in browser |
 

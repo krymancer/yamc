@@ -127,6 +127,12 @@ fn sent_view_shows_recipients() {
     let rows = s.list_threads(&View::Sent, 0, 10);
     assert_eq!(rows.len(), 1, "only Sent-folder conversations");
     assert_eq!(rows[0].from, "To: Ana, bo@x.test");
+    // People you wrote to come first in the address book, then whoever wrote to you.
+    let book = yamc_core::contacts::build(s.contact_sightings(), &["me@x.test".to_string()]);
+    let addrs: Vec<_> = book.iter().map(|a| a.address.as_str()).collect();
+    assert_eq!(&addrs[..2], ["ana@x.test", "bo@x.test"]);
+    assert!(addrs.contains(&"p1@x.test"));
+    assert_eq!(book[0].name.as_deref(), Some("Ana"));
     assert_eq!(s.list_threads(&View::Inbox, 0, 10).len(), 1);
     let _ = std::fs::remove_dir_all(dir);
 }

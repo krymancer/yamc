@@ -217,6 +217,12 @@ impl Core {
         Ok(id)
     }
 
+    /// Everyone you've corresponded with, best first, for recipient autocomplete.
+    pub fn contacts(&self) -> Vec<Address> {
+        let own: Vec<String> = self.store.list_accounts().into_iter().map(|a| a.email).collect();
+        crate::contacts::build(self.store.contact_sightings(), &own)
+    }
+
     /// The From name for an account: set by hand, else what its sent mail already says.
     fn sender_of(&self, a: &AccountRow) -> String {
         a.sender_name.clone().or_else(|| self.store.inferred_sender_name(a.id, &a.email)).unwrap_or_default()

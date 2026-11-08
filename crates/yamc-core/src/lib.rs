@@ -1,5 +1,6 @@
 //! yamc core: storage, IMAP sync, SMTP, MCP. No UI code here.
 
+pub mod contacts;
 pub mod parse;
 pub mod presets;
 pub mod secrets;

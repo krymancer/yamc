@@ -157,6 +157,13 @@ mod tests {
     }
 
     #[test]
+    fn autocompleted_recipients_parse() {
+        for r in ["Júnior Nascimento <a@b.test>", "\"Lucas F. Silva\" <l@b.test>", "\"ACME (support)\" <s@b.test>", "x@b.test"] {
+            assert!(mailbox(r).is_ok(), "{r}");
+        }
+    }
+
+    #[test]
     fn content_types() {
         assert_eq!(content_type_for("a.PDF"), "application/pdf");
         assert_eq!(content_type_for("noext"), "application/octet-stream");

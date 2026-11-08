@@ -22,6 +22,13 @@ Yet another mail client: fast, minimal, dark by default, and drivable by AI agen
 - **No counts, badges or notifications.**
 - **Native email rendering** in the theme's colours, so nothing flashes white. Remote images blocked until `i`.
 - **Local-first:** everything is read from SQLite, never from the network.
+- **Compose without waiting:** Send closes the composer straight away and sends in the background; if it fails, the
+  message is in Drafts. To/Cc autocomplete from everyone you've written to or heard from. Attach files with the
+  button, by dropping them, or by pasting a screenshot.
+- **Attachments you receive** open with a click (saved to `~/Downloads`) or Save as….
+- **Sent** across all accounts, labelled with who it went to.
+- **Per-account label and sender name:** "Gmail" in the sidebar, your real name on outgoing mail. The sender name
+  defaults to the one your sent mail already uses.
 - **MCP server** on `127.0.0.1` so Claude Code / Codex can read, search, draft, mark read and archive. Agents can't send.
 
 See [SPEC.md](SPEC.md) for the design and roadmap.
@@ -71,6 +78,9 @@ Add an account in Settings (`g s`):
 - **Gmail:** app password (needs 2-Step Verification).
 - **Proton:** run Proton Mail Bridge and use the credentials it shows.
 - **Other:** any IMAP/SMTP server.
+
+The label is just for yamc; the sender name is what recipients see. Leave the sender name empty to use the name on
+mail you've already sent from that address.
 - **Outlook:** needs OAuth, coming in milestone 2.
 
 Then copy the Claude Code command or Codex config from Settings → MCP.
@@ -82,7 +92,8 @@ Vim-style, with counts (`5j`, `3J`). Press `?` in the app for the full list.
 - **List:** `j`/`k`, `gg`/`G`, `ctrl-d`/`ctrl-u`, `ctrl-f`/`ctrl-b`, `H`/`M`/`L`, `zz`/`zt`/`zb`, `enter`/`o`/`l` open
 - **Select:** `x` toggle, `V` visual range, then `e`/`dd` archive, `#` delete, `U` unread, `I` read, `esc` clear
 - **Reading:** `j`/`k` scroll, `ctrl-d`/`ctrl-u`, `gg`/`G`, `J`/`K` next/prev conversation, `r`/`a` reply/all, `e` archive, `#` delete, `i` images, `O` open original in browser, `q`/`h`/`esc` back
-- **Anywhere:** `c` compose, `/` search (live; `from:` `to:` `cc:` `subject:` `body:` narrow a word), `g i` inbox, `g d` drafts, `g s` settings, `\` sidebar
+- **Composing:** `ctrl-enter` send, `esc` close (keeps a draft), `↑`/`↓` and `tab`/`enter` pick a suggested address
+- **Anywhere:** `c` compose, `/` search (live; `from:` `to:` `cc:` `subject:` `body:` narrow a word), `g i` inbox, `g t` sent, `g d` drafts, `g s` settings, `\` sidebar
 
 ## Test
 
