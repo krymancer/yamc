@@ -56,6 +56,9 @@ pub struct ThreadList {
     pub loaded: bool,
     pub exhausted: bool,
     pub loading_more: bool,
+    /// Rows are from the previous query and stay on screen until the new results replace them,
+    /// so typing a search doesn't flash an empty list.
+    pub stale: bool,
     pub scroll: UniformListScrollHandle,
 }
 
@@ -66,9 +69,19 @@ impl ThreadList {
         self.scroll.0.borrow().base_handle.set_offset(gpui_kit::point(px(0.), px(0.)));
     }
 
+    /// Like `reset`, but the old rows stay visible until `apply` replaces them.
+    pub fn reset_keep_rows(&mut self) {
+        let rows = std::mem::take(&mut self.rows);
+        self.reset();
+        self.rows = rows;
+        self.stale = true;
+        self.loaded = true;
+    }
+
     pub fn apply(&mut self, next: Vec<ThreadRow>, want: usize) {
         self.exhausted = next.len() < want;
-        self.rows = if self.rows.is_empty() { next } else { merge_stable(&self.rows, next, &self.local) };
+        self.rows = if self.rows.is_empty() || self.stale { next } else { merge_stable(&self.rows, next, &self.local) };
+        self.stale = false;
         self.cursor = self.cursor.min(self.rows.len().saturating_sub(1));
         self.loaded = true;
     }

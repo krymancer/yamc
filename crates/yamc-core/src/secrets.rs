@@ -37,17 +37,30 @@ fn decode_key(s: &str) -> Option<[u8; 32]> {
     STANDARD.decode(s.trim()).ok()?.try_into().ok()
 }
 
-fn keychain_key() -> Option<[u8; 32]> {
-    let entry = keyring::Entry::new(SERVICE, KEY_USER).ok()?;
+enum Keychain {
+    Key([u8; 32]),
+    /// No keychain on this system, or it has no key yet and won't store one.
+    Unavailable,
+    /// Reading failed (access denied, prompt dismissed, no keychain service).
+    Refused(String),
+}
+
+fn keychain_key() -> Keychain {
+    let Ok(entry) = keyring::Entry::new(SERVICE, KEY_USER) else { return Keychain::Unavailable };
     match entry.get_password() {
-        Ok(s) => decode_key(&s),
+        Ok(s) => decode_key(&s).map(Keychain::Key).unwrap_or_else(|| Keychain::Refused("the stored key is malformed".into())),
         Err(keyring::Error::NoEntry) => {
             let k = new_key();
-            entry.set_password(&STANDARD.encode(k)).ok()?;
+            if entry.set_password(&STANDARD.encode(k)).is_err() {
+                return Keychain::Unavailable;
+            }
             // Read back: some stores accept writes they can't return.
-            decode_key(&entry.get_password().ok()?).filter(|r| *r == k)
+            match entry.get_password().ok().and_then(|s| decode_key(&s)) {
+                Some(r) if r == k => Keychain::Key(k),
+                _ => Keychain::Unavailable,
+            }
         }
-        Err(_) => None,
+        Err(e) => Keychain::Refused(e.to_string()),
     }
 }
 
@@ -70,8 +83,20 @@ impl SecretBox {
     /// Use the key file if one exists (it was chosen before), else the keychain, else a new key file.
     pub fn open(data_dir: &Path) -> Result<Self> {
         let use_keychain = std::env::var_os("YAMC_NO_KEYCHAIN").is_none() && !data_dir.join("secret.key").exists();
-        if use_keychain && let Some(k) = keychain_key() {
-            return Ok(Self::from_key(&k, "system keychain"));
+        if use_keychain {
+            match keychain_key() {
+                Keychain::Key(k) => return Ok(Self::from_key(&k, "system keychain")),
+                Keychain::Unavailable => {}
+                // Without a mailbox yet there is nothing to lose, so a key file is fine.
+                Keychain::Refused(_) if !data_dir.join("mail.db").exists() => {}
+                // Otherwise a fresh key file would lock every saved password out for good,
+                // since the key file wins from then on.
+                Keychain::Refused(e) => {
+                    return Err(anyhow!(
+                        "can't read yamc's key from the system keychain ({e}). Allow access when macOS asks, then start yamc again"
+                    ));
+                }
+            }
         }
         Ok(Self::from_key(&file_key(data_dir)?, "key file"))
     }

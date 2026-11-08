@@ -44,7 +44,7 @@ Passwords are sealed with AES-256-GCM using a key kept in the OS keychain (`secr
 
 - Mailboxes are listed per account. Sync covers everything except Spam, Trash, and (on Gmail) All Mail / Important / Starred, which only duplicate other folders.
 - **Headers for all messages**, newest first in batches, so the list and search cover all history.
-- **Bodies for the last 90 days** (configurable), plus anything opened, cached forever.
+- **Bodies for the last 90 days** (configurable), plus anything opened, cached forever. Opening a message fetches its body on a separate reader connection, so it never waits behind a running sync.
 - INBOX is watched with IDLE; other folders re-sync every 5 minutes.
 - Flags: CONDSTORE when the server has it, otherwise a full flag fetch. Deleted messages are reconciled by UID set.
 - UIDVALIDITY change → that mailbox's cache is dropped and re-synced.
@@ -58,7 +58,7 @@ Passwords are sealed with AES-256-GCM using a key kept in the OS keychain (`secr
 
 - **Shared inbox (default):** conversations with a message in any account's INBOX. Unread first, then newest. Opening a conversation marks it read, but it **keeps its position until you leave the view**. New mail appears at the top.
 - **Account → folder:** the same list scoped to one mailbox.
-- **Search:** FTS over subject, from, to, and cached bodies, across all accounts.
+- **Search:** live as you type. FTS prefix match over subject, from, to/cc, and cached bodies, across all accounts; `from:`, `to:`, `cc:`, `subject:`, `body:` scope a word to one field.
 - **Conversation:** Gmail-style stacked messages, latest expanded.
 
 ## Email rendering
@@ -67,6 +67,11 @@ Passwords are sealed with AES-256-GCM using a key kept in the OS keychain (`secr
 - Remote images are blocked until `i`; "always for this sender" is remembered.
 - `O` opens the original in the system browser when the exact look matters.
 - Links open in the system browser.
+- Attachments aren't stored locally. Clicking one downloads it on the reader connection into `~/Downloads` (renamed `name (2).ext` if taken) and opens it; the arrow next to it is Save as….
+
+## Accounts
+
+- Each account has a **label** (shown in yamc) and a **sender name** (the From name on mail you send). Leave the sender name empty and yamc uses the name you most often send under in mail from that address it has already synced.
 
 ## Keyboard
 
@@ -76,6 +81,7 @@ Passwords are sealed with AES-256-GCM using a key kept in the OS keychain (`secr
 | `Enter` / `o` | open |
 | `Esc` / `u` | back |
 | `e` | archive |
+| `#` | delete (move to Trash) |
 | `r` / `a` | reply / reply all |
 | `c` | compose |
 | `/` | search |
@@ -94,7 +100,7 @@ Tools: `list_accounts`, `list_inbox`, `search`, `get_thread`, `create_draft`, `l
 
 1. **POC:** IMAP/SMTP password accounts (Gmail app password, Proton Bridge, generic), shared inbox, folders, conversation view, dark rendering, compose/reply/send, search, MCP server.
 2. Outlook OAuth, then Gmail OAuth.
-3. Attachments (download/attach), move to folder, per-account settings, packaging (AppImage/deb).
+3. ~~Attachments (download/attach)~~, move to folder, per-account settings, packaging (AppImage/deb).
 4. Profiling pass.
 
 ## Out of scope (for now)

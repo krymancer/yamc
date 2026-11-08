@@ -1,0 +1,64 @@
+# Push a tag like v0.2.0 (or create a release with a new tag on GitHub) to publish
+# yamc-macos.zip. The tag sets the version; installed copies pick it up on their next check.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Version from the tag
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "tag must look like v1.2.3, got $GITHUB_REF_NAME"; exit 1; }
+          sed -i '' "s/^version = \".*\"/version = \"$version\"/" crates/yamc/Cargo.toml
+          cargo update -w
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo test --locked -p yamc-core --lib --test store
+
+      # Sign with the release certificate so updates keep one identity (Keychain access sticks)
+      # and the in-app updater accepts them. It's self-made, so macOS doesn't need to trust it.
+      - name: Load signing certificate
+        env:
+          P12: ${{ secrets.MACOS_SIGNING_P12 }}
+          P12_PASSWORD: ${{ secrets.MACOS_SIGNING_PASSWORD }}
+        run: |
+          kc="$RUNNER_TEMP/signing.keychain-db"
+          kc_pass=$(openssl rand -hex 16)
+          echo "$P12" | base64 --decode > "$RUNNER_TEMP/signing.p12"
+          security create-keychain -p "$kc_pass" "$kc"
+          security set-keychain-settings -lut 21600 "$kc"
+          security unlock-keychain -p "$kc_pass" "$kc"
+          security import "$RUNNER_TEMP/signing.p12" -k "$kc" -P "$P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$kc_pass" "$kc" >/dev/null
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | xargs)
+          rm "$RUNNER_TEMP/signing.p12"
+
+      - run: scripts/bundle-macos.sh
+        env:
+          SIGN_IDENTITY: 45E72C5F7F55C6F323D6C533AF45C3BCF0F7D773
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # A release made on GitHub's website already exists; one from a pushed tag doesn't yet.
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/yamc-macos.zip --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/yamc-macos.zip --title "yamc ${GITHUB_REF_NAME#v}" --generate-notes
+          fi
