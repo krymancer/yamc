@@ -32,9 +32,14 @@ The certificate's private key lives in the `MACOS_SIGNING_P12` and `MACOS_SIGNIN
 a backup is kept in the maintainer's login keychain. If it's ever replaced, update `SIGNING_CERT` in
 `crates/yamc/src/update.rs` and the identity in the release workflow; installed copies then need a manual reinstall.
 
-To publish a release, run `scripts/release.sh 0.2.0` on a clean tree. It bumps the version, tags `v0.2.0` and pushes,
-and `.github/workflows/release.yml` builds the universal app and attaches `yamc-macos.zip` to the release.
-`scripts/bundle-macos.sh` builds the same zip locally into `dist/`.
+To publish a release, push a version tag, or create a release with a new `v…` tag on GitHub:
+
+```sh
+git tag -a v0.2.0 -m v0.2.0 && git push origin v0.2.0
+```
+
+`.github/workflows/release.yml` builds the universal app with the tag's version and attaches `yamc-macos.zip` to the
+release. `scripts/bundle-macos.sh` builds the same zip locally into `dist/`.
 
 ## Run from source
 

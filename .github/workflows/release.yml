@@ -1,5 +1,5 @@
-# Push a tag like v0.2.0 (scripts/release.sh does it) to publish yamc-macos.zip as a GitHub
-# release. Installed copies of yamc pick it up on their next update check.
+# Push a tag like v0.2.0 (or create a release with a new tag on GitHub) to publish
+# yamc-macos.zip. The tag sets the version; installed copies pick it up on their next check.
 name: Release
 
 on:
@@ -15,14 +15,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Tag matches the app version
-        run: |
-          version=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/yamc/Cargo.toml | head -1)
-          test "v$version" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME but crates/yamc is $version"; exit 1; }
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Version from the tag
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "tag must look like v1.2.3, got $GITHUB_REF_NAME"; exit 1; }
+          sed -i '' "s/^version = \".*\"/version = \"$version\"/" crates/yamc/Cargo.toml
+          cargo update -w
 
       - uses: Swatinem/rust-cache@v2
 
@@ -53,4 +55,10 @@ jobs:
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/yamc-macos.zip --title "yamc ${GITHUB_REF_NAME#v}" --generate-notes
+        # A release made on GitHub's website already exists; one from a pushed tag doesn't yet.
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/yamc-macos.zip --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/yamc-macos.zip --title "yamc ${GITHUB_REF_NAME#v}" --generate-notes
+          fi
