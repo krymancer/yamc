@@ -2,6 +2,20 @@
 
 # yamc
 
+My ego and ignorance brought me here. Email was always more like notifications to me than anything else. I rarely
+communicated by email, opting, out of convenience or just habit, for an IM client instead. Having been on the internet
+for some years now, I've accumulated a bunch of email addresses that I need to check constantly. I've always looked for
+an email client where I could have all my email in one big inbox: color-coded, insanely fast, minimal and beautiful.
+I tried every option on the "10 best email clients" lists and never really stuck with any of them. I'm just sick of
+scrolling through the list of Google accounts I'm logged into in my browser, or, when I need a 2FA code sent to some
+address, having to log in again because I either reset my PC and never logged back into that Outlook account, or went
+months without using it and got logged out.
+
+That's why I'm making this: so I can have all my "notifications" in one place, as fast as possible. Right now I don't
+have much ambition or many priorities. I just want to make an email client that doesn't suck (for me, at least). It
+won't have that many features; I just need a clean, minimal UI, dark mode, for it to be fucking fast, and for it to
+get out of my way.
+
 Yet another mail client: fast, minimal, dark by default, and drivable by AI agents over MCP.
 
 - **Shared inbox** across all accounts, unread first. Opened mail stays in place until you leave the view.
