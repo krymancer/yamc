@@ -287,9 +287,12 @@ impl Yamc {
     }
 
     fn notify_toast(&mut self, msg: impl Into<String>, cx: &mut Context<Self>) {
-        self.toast = Some(msg.into());
+        let msg = msg.into();
+        // Errors run long; leave them up long enough to read.
+        let secs = if msg.len() > 40 { 12 } else { 4 };
+        self.toast = Some(msg);
         self.toast_timer = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_secs(4)).await;
+            cx.background_executor().timer(Duration::from_secs(secs)).await;
             let _ = this.update(cx, |this, cx| {
                 this.toast = None;
                 cx.notify();
@@ -363,8 +366,8 @@ impl Yamc {
         let c = cx.new(|cx| Composer::new(core, d, accounts, window, cx));
         let sub = cx.subscribe_in(&c, window, |this: &mut Self, _, e: &ComposerEvent, window, cx| {
             this.composer = None;
-            if matches!(e, ComposerEvent::Sent) {
-                this.notify_toast("Sent", cx);
+            if let ComposerEvent::Send(d) = e {
+                this.send_in_background(d.clone(), cx);
             }
             window.focus(&this.focus, cx);
             cx.notify();
@@ -372,6 +375,20 @@ impl Yamc {
         self._subs.push(sub);
         self.composer = Some(c);
         cx.notify();
+    }
+
+    fn send_in_background(&mut self, d: DraftInput, cx: &mut Context<Self>) {
+        self.notify_toast("Sending…", cx);
+        let core = self.core.clone();
+        let task = self.core.runtime().spawn(async move { core.send(&d).await });
+        cx.spawn(async move |this, cx| {
+            let r = task.await.map_err(anyhow::Error::from).and_then(|r| r);
+            let _ = this.update(cx, |this, cx| match r {
+                Ok(()) => this.notify_toast("Sent", cx),
+                Err(e) => this.notify_toast(format!("Not sent, it's in Drafts: {e:#}"), cx),
+            });
+        })
+        .detach();
     }
 
     fn step_thread(&mut self, d: isize, window: &mut Window, cx: &mut Context<Self>) {

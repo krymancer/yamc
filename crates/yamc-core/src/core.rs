@@ -427,6 +427,17 @@ impl Core {
         })
     }
 
+    /// The checks `send` would fail on before touching the network, so the UI can refuse
+    /// right away instead of after it has closed the composer.
+    pub fn check_sendable(&self, d: &DraftInput) -> Result<()> {
+        self.store.account(d.account_id).ok_or_else(|| anyhow!("unknown account"))?;
+        if split_addresses(&d.to).is_empty() {
+            return Err(anyhow!("No recipients"));
+        }
+        Self::read_attachments(&d.attachments)?;
+        Ok(())
+    }
+
     pub async fn send(&self, d: &DraftInput) -> Result<()> {
         let account = self.store.account(d.account_id).ok_or_else(|| anyhow!("unknown account"))?;
         let to = split_addresses(&d.to);

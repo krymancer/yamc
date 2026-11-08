@@ -10,7 +10,6 @@ use gpui_kit::component::{Icon, Sizable, h_flex, v_flex};
 use gpui_kit::assets::IconName;
 use gpui_kit::*;
 use gpui_kit::prelude::*;
-use gpui_kit::component::Disableable as _;
 use yamc_core::core::Core;
 use yamc_core::types::{Account, DraftInput};
 
@@ -18,7 +17,8 @@ use crate::theme::Palette;
 
 pub enum ComposerEvent {
     Close,
-    Sent,
+    /// Checked and saved as a draft; the app sends it in the background.
+    Send(DraftInput),
 }
 
 impl EventEmitter<ComposerEvent> for Composer {}
@@ -31,7 +31,6 @@ pub struct Composer {
     cc: Entity<InputState>,
     subject: Entity<InputState>,
     body: Entity<TextareaState>,
-    busy: bool,
     error: Option<String>,
     focus: FocusHandle,
 }
@@ -53,7 +52,7 @@ impl Composer {
         if draft.reply_to.is_some() {
             body.update(cx, |b, cx| b.set_cursor_position(gpui_kit::component::input::Position::new(0, 0), window, cx));
         }
-        Self { core, draft, accounts, to, cc, subject, body, busy: false, error: None, focus: cx.focus_handle() }
+        Self { core, draft, accounts, to, cc, subject, body, error: None, focus: cx.focus_handle() }
     }
 
     fn current(&self, cx: &App) -> DraftInput {
@@ -215,28 +214,22 @@ impl Composer {
         cx.notify();
     }
 
+    /// Close right away and send in the background. The message is saved as a draft first,
+    /// so a failed send (or a crash mid-send) leaves it in Drafts.
     pub fn send(&mut self, cx: &mut Context<Self>) {
-        if self.busy {
-            return;
-        }
-        let d = self.current(cx);
-        self.busy = true;
-        self.error = None;
-        cx.notify();
-        let core = self.core.clone();
-        let task = self.core.runtime().spawn(async move { core.send(&d).await });
-        cx.spawn(async move |this, cx| {
-            let r = task.await.map_err(anyhow::Error::from).and_then(|r| r);
-            let _ = this.update(cx, |this, cx| {
-                this.busy = false;
-                match r {
-                    Ok(()) => cx.emit(ComposerEvent::Sent),
-                    Err(e) => this.error = Some(format!("{e:#}")),
-                }
+        let mut d = self.current(cx);
+        let saved = self.core.check_sendable(&d).and_then(|_| self.core.save_draft(&d));
+        match saved {
+            Ok(id) => {
+                d.id = Some(id);
+                self.draft.id = Some(id);
+                cx.emit(ComposerEvent::Send(d));
+            }
+            Err(e) => {
+                self.error = Some(format!("{e:#}"));
                 cx.notify();
-            });
-        })
-        .detach();
+            }
+        }
     }
 
     fn cycle_account(&mut self, cx: &mut Context<Self>) {
@@ -348,8 +341,7 @@ impl Render for Composer {
                         Button::new("send")
                             .primary()
                             .small()
-                            .label(if self.busy { "Sending…" } else { "Send" })
-                            .disabled(self.busy)
+                            .label("Send")
                             .on_click(cx.listener(|this, _, _, cx| this.send(cx))),
                     )
                     .child(
