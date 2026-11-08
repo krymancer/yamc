@@ -89,7 +89,7 @@ async fn core_against_greenmail() {
     let dir = std::env::temp_dir().join(format!("yamc-it-{stamp}"));
     let core = Core::open(&dir, tokio::runtime::Handle::current()).unwrap();
     let account_id = core
-        .add_account(AccountInput { name: "Me".into(), email: user.clone(), kind: AccountKind::Imap, config: cfg.clone(), password: "pw".into() })
+        .add_account(AccountInput { name: "Me".into(), sender_name: String::new(), email: user.clone(), kind: AccountKind::Imap, config: cfg.clone(), password: "pw".into() })
         .await
         .unwrap();
 

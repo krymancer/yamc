@@ -1,3 +1,4 @@
 *.log
 .yamc-dev
 target
+dist

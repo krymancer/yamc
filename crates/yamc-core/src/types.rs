@@ -62,7 +62,10 @@ pub struct AccountConfig {
 
 #[derive(Clone, Debug)]
 pub struct AccountInput {
+    /// Label shown in yamc (sidebar, settings). Empty shows the address.
     pub name: String,
+    /// From name on mail you send. Empty: inferred from mail you've already sent.
+    pub sender_name: String,
     pub email: String,
     pub kind: AccountKind,
     pub config: AccountConfig,
@@ -81,7 +84,12 @@ pub enum SyncState {
 #[derive(Clone, Debug)]
 pub struct Account {
     pub id: i64,
+    /// Label shown in yamc.
     pub name: String,
+    /// From name set by hand, if any.
+    pub sender_name: Option<String>,
+    /// The From name actually used: `sender_name`, else inferred from sent mail, else empty.
+    pub sender: String,
     pub email: String,
     pub kind: AccountKind,
     pub config: AccountConfig,
@@ -126,6 +134,8 @@ impl Address {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum View {
     Inbox,
+    /// Every account's Sent folder together.
+    Sent,
     Mailbox(i64),
     Search(String),
     Drafts,
@@ -136,7 +146,7 @@ pub struct ThreadRow {
     pub account_id: i64,
     pub thread_id: String,
     pub subject: String,
-    /// Display names of senders, latest first.
+    /// Display names of senders, latest first ("To: …" in the Sent view).
     pub from: String,
     pub snippet: String,
     pub date: i64,
@@ -203,6 +213,8 @@ pub struct Draft {
     /// `user` or `agent`.
     pub created_by: String,
     pub updated_at: i64,
+    /// Paths of files to attach.
+    pub attachments: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -215,6 +227,9 @@ pub struct DraftInput {
     pub body: String,
     pub reply_to: Option<i64>,
     pub created_by: Option<String>,
+    /// Paths of files to attach. Agents can't set these (MCP has no field for it), so a draft
+    /// can never quietly carry one of your files out.
+    pub attachments: Vec<String>,
 }
 
 impl From<&Draft> for DraftInput {
@@ -228,6 +243,7 @@ impl From<&Draft> for DraftInput {
             body: d.body.clone(),
             reply_to: d.reply_to,
             created_by: Some(d.created_by.clone()),
+            attachments: d.attachments.clone(),
         }
     }
 }

@@ -19,6 +19,25 @@ use tokio_rustls::rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, S
 use crate::types::{AccountConfig, ServerConfig, TlsMode};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+/// A server that says nothing this long after connecting is waiting for a TLS handshake.
+pub const GREETING_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The server accepted the connection but never greeted: it almost always means it expects
+/// TLS from the first byte while we spoke plain text (or STARTTLS).
+#[derive(Debug)]
+pub struct NoGreeting(pub String);
+
+impl std::fmt::Display for NoGreeting {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} accepted the connection but never answered; it probably expects TLS, not STARTTLS", self.0)
+    }
+}
+
+impl std::error::Error for NoGreeting {}
+
+pub fn is_no_greeting(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.is::<NoGreeting>())
+}
 const LOOPBACK: [&str; 3] = ["127.0.0.1", "localhost", "::1"];
 
 /// Self-signed certificates are only accepted from this machine (Proton Bridge).
@@ -139,11 +158,12 @@ pub async fn imap_connect(cfg: &AccountConfig, password: &str) -> Result<Session
         .map_err(|_| anyhow!("timed out connecting to {}:{}", s.host, s.port))?
         .with_context(|| format!("can't reach {}:{}", s.host, s.port))?;
     let _ = tcp.set_nodelay(true);
+    let addr = format!("{}:{}", s.host, s.port);
     let client = match s.tls {
-        TlsMode::Tls => greeted(async_imap::Client::new(tls_wrap(tcp, &s.host, insecure).await?)).await?,
-        TlsMode::None => greeted(async_imap::Client::new(Stream::Plain(tcp))).await?,
+        TlsMode::Tls => greeted(async_imap::Client::new(tls_wrap(tcp, &s.host, insecure).await?), &addr).await?,
+        TlsMode::None => greeted(async_imap::Client::new(Stream::Plain(tcp)), &addr).await?,
         TlsMode::Starttls => {
-            let mut plain = greeted(async_imap::Client::new(Stream::Plain(tcp))).await?;
+            let mut plain = greeted(async_imap::Client::new(Stream::Plain(tcp)), &addr).await?;
             plain.run_command_and_check_ok("STARTTLS", None).await.context("STARTTLS")?;
             let Stream::Plain(tcp) = plain.into_inner() else { unreachable!() };
             // No second greeting after STARTTLS.
@@ -153,7 +173,10 @@ pub async fn imap_connect(cfg: &AccountConfig, password: &str) -> Result<Session
     client.login(&cfg.username, password).await.map_err(|(e, _)| anyhow!("login failed: {e}"))
 }
 
-async fn greeted(mut c: async_imap::Client<Stream>) -> Result<async_imap::Client<Stream>> {
-    c.read_response().await?.ok_or_else(|| anyhow!("server closed the connection"))?;
+async fn greeted(mut c: async_imap::Client<Stream>, addr: &str) -> Result<async_imap::Client<Stream>> {
+    tokio::time::timeout(GREETING_TIMEOUT, c.read_response())
+        .await
+        .map_err(|_| NoGreeting(addr.to_string()))??
+        .ok_or_else(|| anyhow!("server closed the connection"))?;
     Ok(c)
 }

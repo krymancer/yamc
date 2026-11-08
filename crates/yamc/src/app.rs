@@ -20,6 +20,7 @@ use crate::menus;
 use crate::list::{PAGE, ROW, Screen as ScreenPos, ThreadList};
 use crate::settings::SettingsView;
 use crate::theme::{self, Palette};
+use crate::update::{Status as UpdateStatus, Updater};
 use crate::thread::{ThreadEvent, ThreadView, kbd};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,6 +62,7 @@ pub struct Yamc {
     toast: Option<String>,
     toast_timer: Option<Task<()>>,
     images: Images,
+    updater: Entity<Updater>,
     theme_key: (String, String, bool),
     _subs: Vec<Subscription>,
 }
@@ -107,6 +109,9 @@ impl Yamc {
         // Follow the OS light/dark switch when the theme is "system".
         let appearance = cx.observe_window_appearance(window, |this: &mut Self, window, cx| this.apply_theme(Some(window), cx));
 
+        let updater = cx.new(|cx| Updater::new(core.runtime().clone(), cx));
+        let updates = cx.observe(&updater, |_, _, cx| cx.notify());
+
         let s = core.get_settings();
         let mut this = Self {
             accounts: core.list_accounts(),
@@ -134,8 +139,9 @@ impl Yamc {
             toast: None,
             toast_timer: None,
             images: Images::default(),
+            updater,
             theme_key: (s.theme, s.accent, false),
-            _subs: vec![sub, appearance],
+            _subs: vec![sub, appearance, updates],
         };
         this.apply_theme(Some(window), cx);
         if this.accounts.is_empty() {
@@ -177,7 +183,7 @@ impl Yamc {
 
     fn current_view(&self) -> Option<View> {
         match &self.screen {
-            Screen::View(v @ (View::Inbox | View::Mailbox(_) | View::Search(_))) => Some(v.clone()),
+            Screen::View(v @ (View::Inbox | View::Sent | View::Mailbox(_) | View::Search(_))) => Some(v.clone()),
             _ => None,
         }
     }
@@ -293,6 +299,9 @@ impl Yamc {
     }
 
     fn archive(&mut self, row: &ThreadRow, cx: &mut Context<Self>) {
+        if self.screen == Screen::View(View::Sent) {
+            return self.notify_toast("Archive moves mail out of the Inbox; use Delete in Sent", cx);
+        }
         self.list.remove_local(&row.key());
         if let Err(e) = self.core.archive_thread(row.account_id, &row.thread_id) {
             self.notify_toast(format!("{e:#}"), cx);
@@ -478,6 +487,7 @@ impl Yamc {
             Cmd::Back => self.close_thread(cx),
             Cmd::GoInbox => self.go(Screen::View(View::Inbox), cx),
             Cmd::GoDrafts => self.go(Screen::View(View::Drafts), cx),
+            Cmd::GoSent => self.go(Screen::View(View::Sent), cx),
             Cmd::GoSettings => self.go(Screen::Settings, cx),
             Cmd::Search => {
                 let f = self.search.read(cx).focus_handle(cx);
@@ -579,6 +589,7 @@ impl Yamc {
         match &self.screen {
             Screen::Settings => "Settings".into(),
             Screen::View(View::Inbox) => "Inbox".into(),
+            Screen::View(View::Sent) => "Sent".into(),
             Screen::View(View::Drafts) => "Drafts".into(),
             Screen::View(View::Search(q)) => format!("Search: {q}"),
             Screen::View(View::Mailbox(id)) => self.mailboxes.iter().find(|m| m.id == *id).map(|m| m.name.clone()).unwrap_or_default(),
@@ -679,6 +690,10 @@ impl Yamc {
                     .on_click(cx.listener(|this, _, _, cx| this.go(Screen::View(View::Inbox), cx))),
             )
             .child(
+                self.nav("nav-sent", Some(IconName::Send), "Sent".into(), self.screen == Screen::View(View::Sent), pal)
+                    .on_click(cx.listener(|this, _, _, cx| this.go(Screen::View(View::Sent), cx))),
+            )
+            .child(
                 self.nav("nav-drafts", Some(IconName::FilePen), "Drafts".into(), self.screen == Screen::View(View::Drafts), pal)
                     .on_click(cx.listener(|this, _, _, cx| this.go(Screen::View(View::Drafts), cx))),
             );
@@ -730,10 +745,38 @@ impl Yamc {
                 }
             }
         }
-        col.child(div().flex_1()).child(
+        col.child(div().flex_1()).children(self.render_update(pal, cx)).child(
             self.nav("nav-settings", Some(IconName::Settings), "Settings".into(), self.screen == Screen::Settings, pal)
                 .on_click(cx.listener(|this, _, _, cx| this.go(Screen::Settings, cx))),
         )
+    }
+
+    /// Sidebar line for an update in progress, ready, or a check you asked for.
+    fn render_update(&self, pal: &Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let status = self.updater.read(cx).status.clone();
+        let line = |text: String, color: Hsla| div().px_4().py_1().text_xs().text_color(color).child(text).into_any_element();
+        Some(match status {
+            UpdateStatus::Idle | UpdateStatus::Checking => return None,
+            UpdateStatus::UpToDate => line(format!("yamc {} is up to date", crate::update::VERSION), pal.faint),
+            UpdateStatus::Downloading(v) => line(format!("Downloading yamc {v}…"), pal.faint),
+            UpdateStatus::Failed(e) => line(e, pal.danger),
+            UpdateStatus::Ready(v) => h_flex()
+                .id("update-restart")
+                .mx_2()
+                .mb_1()
+                .px_2()
+                .h(px(30.))
+                .gap_2()
+                .rounded_md()
+                .bg(pal.accent)
+                .text_color(pal.accent_fg)
+                .text_sm()
+                .cursor_pointer()
+                .child(Icon::new(IconName::Download).size_4())
+                .child(format!("Restart to update to {v}"))
+                .on_click(cx.listener(|this, _, _, cx| this.updater.update(cx, |u, cx| u.restart(cx))))
+                .into_any_element(),
+        })
     }
 
     fn icon_button(&self, id: &'static str, icon: IconName, label: &'static str, key: &'static str, pal: &Palette) -> Stateful<Div> {
@@ -949,7 +992,10 @@ impl Yamc {
             } else if self.accounts.is_empty() {
                 Self::empty(IconName::Inbox, "No accounts yet", "Add one in Settings (g s).", pal)
             } else {
-                Self::empty(IconName::Inbox, "All clear", "Nothing in here.", pal)
+                match &self.screen {
+                    Screen::View(View::Sent) => Self::empty(IconName::Send, "Nothing sent yet", "Mail you send shows up here.", pal),
+                    _ => Self::empty(IconName::Inbox, "All clear", "Nothing in here.", pal),
+                }
             };
         }
         let multi = self.accounts.len() > 1;
@@ -1056,6 +1102,7 @@ impl Yamc {
             .id("help-overlay")
             .absolute()
             .inset_0()
+            .occlude()
             .bg(Hsla { a: 0.55, ..black() })
             .flex()
             .items_center()
@@ -1128,11 +1175,13 @@ impl Render for Yamc {
             .key_context("Yamc")
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
+            .on_action(cx.listener(|this, _: &menus::CheckForUpdates, _, cx| this.updater.update(cx, |u, cx| u.check(true, cx))))
             .on_action(cx.listener(|this, _: &menus::NewMessage, w, cx| this.run(Cmd::Compose, None, w, cx)))
             .on_action(cx.listener(|this, _: &menus::OpenSettings, w, cx| this.run(Cmd::GoSettings, None, w, cx)))
             .on_action(cx.listener(|this, _: &menus::FocusSearch, w, cx| this.run(Cmd::Search, None, w, cx)))
             .on_action(cx.listener(|this, _: &menus::GoInbox, w, cx| this.run(Cmd::GoInbox, None, w, cx)))
             .on_action(cx.listener(|this, _: &menus::GoDrafts, w, cx| this.run(Cmd::GoDrafts, None, w, cx)))
+            .on_action(cx.listener(|this, _: &menus::GoSent, w, cx| this.run(Cmd::GoSent, None, w, cx)))
             .on_action(cx.listener(|this, _: &menus::Archive, w, cx| this.run(Cmd::Archive, None, w, cx)))
             .on_action(cx.listener(|this, _: &menus::Trash, w, cx| this.run(Cmd::Trash, None, w, cx)))
             .on_action(cx.listener(|this, _: &menus::MarkUnread, w, cx| this.run(Cmd::MarkUnread, None, w, cx)))
@@ -1162,13 +1211,15 @@ impl Render for Yamc {
                             .children(status),
                     ),
             )
-            .when_some(self.composer.clone(), |d, c| d.child(div().absolute().bottom_4().right_4().child(c)))
+            // Overlays occlude: without it a click on them also lands on the list row underneath.
+            .when_some(self.composer.clone(), |d, c| d.child(div().absolute().bottom_4().right_4().occlude().child(c)))
             .when_some(self.toast.clone(), |d, t| {
                 d.child(
                     div()
                         .absolute()
                         .bottom_4()
                         .left(px(if self.sidebar { 248. } else { 16. }))
+                        .occlude()
                         .px_3()
                         .py_2()
                         .rounded_md()

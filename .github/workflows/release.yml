@@ -1,0 +1,36 @@
+# Push a tag like v0.2.0 (scripts/release.sh does it) to publish yamc-macos.zip as a GitHub
+# release. Installed copies of yamc pick it up on their next update check.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag matches the app version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/yamc/Cargo.toml | head -1)
+          test "v$version" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME but crates/yamc is $version"; exit 1; }
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo test --locked -p yamc-core --lib --test store
+
+      - run: scripts/bundle-macos.sh
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/yamc-macos.zip --title "yamc ${GITHUB_REF_NAME#v}" --generate-notes

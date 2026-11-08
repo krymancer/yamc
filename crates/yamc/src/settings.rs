@@ -19,6 +19,7 @@ struct AddForm {
     kind: AccountKind,
     email: Entity<InputState>,
     name: Entity<InputState>,
+    sender: Entity<InputState>,
     password: Entity<InputState>,
     username: Entity<InputState>,
     imap_host: Entity<InputState>,
@@ -33,9 +34,18 @@ struct AddForm {
     _subs: Vec<Subscription>,
 }
 
+struct Renaming {
+    id: i64,
+    label: Entity<InputState>,
+    sender: Entity<InputState>,
+    _subs: [Subscription; 2],
+}
+
 pub struct SettingsView {
     core: Arc<Core>,
     form: Option<AddForm>,
+    /// Account whose label and sender name are being edited.
+    renaming: Option<Renaming>,
     body_days: Entity<InputState>,
     copied: Option<&'static str>,
     pub scroll: ScrollHandle,
@@ -62,11 +72,41 @@ impl SettingsView {
             }
         })
         .detach();
-        let mut this = Self { core, form: None, body_days, copied: None, scroll: ScrollHandle::new() };
+        let mut this = Self { core, form: None, renaming: None, body_days, copied: None, scroll: ScrollHandle::new() };
         if adding {
             this.open_form(window, cx);
         }
         this
+    }
+
+    fn start_rename(&mut self, a: &Account, window: &mut Window, cx: &mut Context<Self>) {
+        let label = cx.new(|cx| InputState::new(window, cx).placeholder(a.email.clone()).default_value(a.name.clone()));
+        // Unset shows what yamc infers, so clearing the field visibly means "use that".
+        let hint = if a.sender.is_empty() { "Your name".to_string() } else { a.sender.clone() };
+        let sender = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(hint).default_value(a.sender_name.clone().unwrap_or_default())
+        });
+        let enter = |input: &Entity<InputState>, cx: &mut Context<Self>| {
+            cx.subscribe(input, |this: &mut Self, _, e: &gpui_kit::component::input::InputEvent, cx| {
+                if matches!(e, gpui_kit::component::input::InputEvent::PressEnter { .. }) {
+                    this.finish_rename(true, cx);
+                }
+            })
+        };
+        let subs = [enter(&label, cx), enter(&sender, cx)];
+        window.focus(&label.read(cx).focus_handle(cx), cx);
+        label.update(cx, |s, cx| s.select_all(window, cx));
+        self.renaming = Some(Renaming { id: a.id, label, sender, _subs: subs });
+        cx.notify();
+    }
+
+    fn finish_rename(&mut self, save: bool, cx: &mut Context<Self>) {
+        if let Some(r) = self.renaming.take()
+            && save
+        {
+            let _ = self.core.rename_account(r.id, &r.label.read(cx).value(), &r.sender.read(cx).value());
+        }
+        cx.notify();
     }
 
     pub fn open_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -80,7 +120,8 @@ impl SettingsView {
         });
         let form = AddForm {
             kind: AccountKind::Gmail,
-            name: input("Your name", window, cx),
+            name: input("Gmail, Work…", window, cx),
+            sender: input("Inferred from your sent mail", window, cx),
             password: cx.new(|cx| InputState::new(window, cx).masked(true)),
             username: input("username", window, cx),
             imap_host: cx.new(|cx| InputState::new(window, cx).default_value(cfg.imap.host.clone())),
@@ -144,9 +185,9 @@ impl SettingsView {
             username: if username.is_empty() { email.clone() } else { username },
             ..preset
         };
-        let name = f.name.read(cx).value().trim().to_string();
         let input = AccountInput {
-            name: if name.is_empty() { email.split('@').next().unwrap_or(&email).to_string() } else { name },
+            name: f.name.read(cx).value().trim().to_string(),
+            sender_name: f.sender.read(cx).value().trim().to_string(),
             email,
             kind: f.kind,
             config,
@@ -208,6 +249,42 @@ impl SettingsView {
                 (_, Some(e)) => e.clone(),
                 (s, None) => format!("{s:?}").to_lowercase(),
             };
+            let editing = self.renaming.as_ref().filter(|r| r.id == id).map(|r| (r.label.clone(), r.sender.clone()));
+            let account = a.clone();
+            let title: AnyElement = match &editing {
+                Some((label, sender)) => h_flex()
+                    .gap_2()
+                    .pb_1()
+                    .child(v_flex().gap_1().w(px(200.)).child(div().text_xs().text_color(pal.faint).child("Label")).child(Input::new(label).small()))
+                    .child(v_flex().gap_1().w(px(200.)).child(div().text_xs().text_color(pal.faint).child("Sender name")).child(Input::new(sender).small()))
+                    .child(div().pt_4().flex().gap_2().items_center()
+                    .child(
+                        Button::new(("rename-save", id as u64))
+                            .small()
+                            .label("Save")
+                            .on_click(cx.listener(|this, _, _, cx| this.finish_rename(true, cx))),
+                    )
+                    .child(
+                        Button::new(("rename-cancel", id as u64))
+                            .ghost()
+                            .small()
+                            .label("Cancel")
+                            .on_click(cx.listener(|this, _, _, cx| this.finish_rename(false, cx))),
+                    ))
+                    .into_any_element(),
+                None => {
+                    let label = if a.name.is_empty() { a.email.clone() } else { format!("{} · {}", a.name, a.email) };
+                    let sends_as = match (&a.sender_name, a.sender.is_empty()) {
+                        (_, true) => "Sends with no name — set one with ✎".to_string(),
+                        (Some(_), false) => format!("Sends as {}", a.sender),
+                        (None, false) => format!("Sends as {} (from your sent mail)", a.sender),
+                    };
+                    v_flex()
+                        .child(div().text_sm().text_color(pal.strong).child(label))
+                        .child(div().text_xs().text_color(pal.muted).child(sends_as))
+                        .into_any_element()
+                }
+            };
             h_flex()
                 .px_4()
                 .py_3()
@@ -218,7 +295,7 @@ impl SettingsView {
                     v_flex()
                         .flex_1()
                         .min_w_0()
-                        .child(div().text_sm().text_color(pal.strong).child(format!("{} · {}", a.name, a.email)))
+                        .child(title)
                         .child(div().text_xs().text_color(pal.faint).overflow_hidden().text_ellipsis().whitespace_nowrap().child(format!(
                             "{} · {}:{} · {state}",
                             a.kind.as_str(),
@@ -226,6 +303,16 @@ impl SettingsView {
                             a.config.imap.port
                         ))),
                 )
+                .when(editing.is_none(), |d| {
+                    d.child(
+                        Button::new(("rename", id as u64))
+                            .ghost()
+                            .small()
+                            .icon(IconName::Pencil)
+                            .tooltip("Edit label and sender name")
+                            .on_click(cx.listener(move |this, _, window, cx| this.start_rename(&account, window, cx))),
+                    )
+                })
                 .child(
                     Button::new(("remove", id as u64))
                         .ghost()
@@ -313,7 +400,8 @@ impl SettingsView {
             .child(kinds)
             .child(div().text_sm().text_color(pal.muted).child(preset.help))
             .child(Self::field("Email", Input::new(&f.email).small(), pal))
-            .child(Self::field("Display name", Input::new(&f.name).small(), pal))
+            .child(Self::field("Label", Input::new(&f.name).small(), pal))
+            .child(Self::field("Sender name", Input::new(&f.sender).small(), pal))
             .child(Self::field(preset.password_label, Input::new(&f.password).small(), pal))
             .when(advanced, |d| {
                 d.child(Self::field("Username", Input::new(&f.username).small(), pal))

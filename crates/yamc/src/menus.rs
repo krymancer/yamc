@@ -15,6 +15,7 @@ actions!(
         FocusSearch,
         GoInbox,
         GoDrafts,
+        GoSent,
         Archive,
         Trash,
         MarkUnread,
@@ -25,6 +26,7 @@ actions!(
         ShowKeys,
         Minimize,
         Zoom,
+        CheckForUpdates,
     ]
 );
 
@@ -44,6 +46,8 @@ pub fn install(cx: &mut App) {
     ]);
     cx.set_menus([
         Menu::new("yamc").items([
+            MenuItem::action("Check for Updates…", CheckForUpdates),
+            MenuItem::separator(),
             MenuItem::action("Settings…", OpenSettings),
             MenuItem::separator(),
             MenuItem::action("Hide yamc", Hide),
@@ -76,6 +80,7 @@ pub fn install(cx: &mut App) {
         ]),
         Menu::new("View").items([
             MenuItem::action("Inbox", GoInbox),
+            MenuItem::action("Sent", GoSent),
             MenuItem::action("Drafts", GoDrafts),
             MenuItem::separator(),
             MenuItem::action("Toggle Sidebar", ToggleSidebar),

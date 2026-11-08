@@ -11,10 +11,10 @@ use tokio::runtime::Handle;
 use tokio::sync::broadcast;
 
 use crate::mcp::{McpInfo, McpServer};
-use crate::net::imap_connect;
+use crate::net::{imap_connect, is_no_greeting};
 use crate::secrets::SecretBox;
 use crate::smtp;
-use crate::store::{AccountRow, INBOX, Op, Store};
+use crate::store::{AccountRow, INBOX, Op, SENT, Store};
 use crate::sync::{AccountSync, Emit};
 use crate::types::*;
 
@@ -45,6 +45,8 @@ impl Emitter {
     }
 }
 
+const MAX_MESSAGE_BYTES: usize = 25 * 1024 * 1024;
+
 pub struct Core {
     pub store: Arc<Store>,
     pub data_dir: PathBuf,
@@ -58,6 +60,26 @@ pub struct Core {
 
 pub fn split_addresses(list: &str) -> Vec<String> {
     list.split([',', ';']).map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect()
+}
+
+/// A file name from a sender can't climb out of the folder or be hidden.
+fn safe_filename(name: &str) -> String {
+    let clean: String = name.chars().map(|c| if matches!(c, '/' | '\\' | ':' | '\0') || c.is_control() { '_' } else { c }).collect();
+    let clean = clean.trim().trim_start_matches('.').trim();
+    if clean.is_empty() { "attachment".into() } else { clean.chars().take(200).collect() }
+}
+
+/// `dir/name`, or `dir/name (2).ext` and so on if that's taken.
+fn unique_path(dir: &Path, name: &str) -> PathBuf {
+    let first = dir.join(name);
+    if !first.exists() {
+        return first;
+    }
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() => (s, format!(".{e}")),
+        _ => (name, String::new()),
+    };
+    (2..).map(|n| dir.join(format!("{stem} ({n}){ext}"))).find(|p| !p.exists()).unwrap()
 }
 
 pub fn default_data_dir() -> PathBuf {
@@ -151,25 +173,60 @@ impl Core {
             .into_iter()
             .map(|a| {
                 let (state, error) = syncs.get(&a.id).map(|s| s.state()).unwrap_or((SyncState::Idle, None));
-                Account { id: a.id, name: a.name, email: a.email, kind: a.kind, config: a.config, state, error }
+                let sender = self.sender_of(&a);
+                Account { id: a.id, name: a.name, sender_name: a.sender_name, sender, email: a.email, kind: a.kind, config: a.config, state, error }
             })
             .collect()
     }
 
-    pub async fn test_account(input: &AccountInput) -> Result<()> {
-        let mut s = imap_connect(&input.config, &input.password).await.map_err(|e| anyhow!("IMAP: {e:#}"))?;
+    /// Log in to both servers. Returns the config that worked: a server that stays silent on
+    /// STARTTLS is retried with TLS from the start (Proton Bridge can be set either way).
+    pub async fn test_account(input: &AccountInput) -> Result<AccountConfig> {
+        let pw = &input.password;
+        let mut cfg = input.config.clone();
+        if let Err(e) = Self::test_imap(&cfg, pw).await {
+            if !(cfg.imap.tls == TlsMode::Starttls && is_no_greeting(&e)) {
+                return Err(anyhow!("IMAP: {e:#}"));
+            }
+            cfg.imap.tls = TlsMode::Tls;
+            // TLS got further than STARTTLS did, so its error is the one worth showing.
+            Self::test_imap(&cfg, pw).await.map_err(|e| anyhow!("IMAP: {e:#}"))?;
+        }
+        if let Err(e) = smtp::verify(&cfg, pw).await {
+            if !(cfg.smtp.tls == TlsMode::Starttls && is_no_greeting(&e)) {
+                return Err(anyhow!("SMTP: {e:#}"));
+            }
+            cfg.smtp.tls = TlsMode::Tls;
+            smtp::verify(&cfg, pw).await.map_err(|e| anyhow!("SMTP: {e:#}"))?;
+        }
+        Ok(cfg)
+    }
+
+    async fn test_imap(cfg: &AccountConfig, password: &str) -> Result<()> {
+        let mut s = imap_connect(cfg, password).await?;
         let _ = s.logout().await;
-        smtp::verify(&input.config, &input.password).await.map_err(|e| anyhow!("SMTP: {e:#}"))?;
         Ok(())
     }
 
-    pub async fn add_account(self: &Arc<Self>, input: AccountInput) -> Result<i64> {
-        Self::test_account(&input).await?;
+    pub async fn add_account(self: &Arc<Self>, mut input: AccountInput) -> Result<i64> {
+        input.config = Self::test_account(&input).await?;
         let id = self.store.add_account(&input)?;
         let row = self.store.account(id).ok_or_else(|| anyhow!("account vanished"))?;
         self.start_sync(row);
         self.emit(CoreEvent::Accounts);
         Ok(id)
+    }
+
+    /// The From name for an account: set by hand, else what its sent mail already says.
+    fn sender_of(&self, a: &AccountRow) -> String {
+        a.sender_name.clone().or_else(|| self.store.inferred_sender_name(a.id, &a.email)).unwrap_or_default()
+    }
+
+    /// Change the label and the From name. An empty sender name means infer it again.
+    pub fn rename_account(&self, id: i64, label: &str, sender_name: &str) -> Result<()> {
+        self.store.rename_account(id, label.trim(), sender_name)?;
+        self.emit(CoreEvent::Accounts);
+        Ok(())
     }
 
     pub fn remove_account(&self, id: i64) -> Result<()> {
@@ -207,6 +264,33 @@ impl Core {
         let rx = self.syncs.lock().unwrap().get(&m.account_id)?.request_body(id);
         let _ = rx.await;
         self.store.get_message(id)
+    }
+
+    /// Download attachment `index` of a message (as listed in `Message::attachments`) into
+    /// `dir`, under its own name made unique there. Returns the saved path.
+    pub async fn save_attachment(&self, message_id: i64, index: usize, dir: &Path) -> Result<PathBuf> {
+        let (name, data) = self.attachment(message_id, index).await?;
+        std::fs::create_dir_all(dir)?;
+        let path = unique_path(dir, &safe_filename(&name));
+        std::fs::write(&path, data).with_context(|| format!("can't write {}", path.display()))?;
+        Ok(path)
+    }
+
+    /// Download attachment `index` to exactly `path` (a Save As… choice).
+    pub async fn save_attachment_as(&self, message_id: i64, index: usize, path: &Path) -> Result<()> {
+        let (_, data) = self.attachment(message_id, index).await?;
+        std::fs::write(path, data).with_context(|| format!("can't write {}", path.display()))
+    }
+
+    async fn attachment(&self, message_id: i64, index: usize) -> Result<(String, Vec<u8>)> {
+        let m = self.store.get_message(message_id).ok_or_else(|| anyhow!("message is gone"))?;
+        let src = {
+            let syncs = self.syncs.lock().unwrap();
+            let s = syncs.get(&m.account_id).ok_or_else(|| anyhow!("account isn't connected"))?;
+            s.fetch_source(message_id)
+        };
+        let src = src.await.map_err(|_| anyhow!("yamc stopped syncing this account"))??;
+        crate::parse::attachment_data(&src, index).ok_or_else(|| anyhow!("attachment not found in the message"))
     }
 
     // ---------- actions ----------
@@ -339,6 +423,7 @@ impl Core {
             body: format!("\n\nOn {when}, {who} wrote:\n{quoted}"),
             reply_to: Some(m.id),
             created_by: None,
+            attachments: Vec::new(),
         })
     }
 
@@ -354,8 +439,10 @@ impl Core {
         if let Some(id) = parent.as_ref().and_then(|p| p.message_id.clone()) {
             refs.push(id);
         }
+        let files = Self::read_attachments(&d.attachments)?;
+        let from_name = self.sender_of(&account);
         let msg = smtp::build(&smtp::Outgoing {
-            from_name: &account.name,
+            from_name: &from_name,
             from_addr: &account.email,
             to: &to,
             cc: &cc,
@@ -363,12 +450,13 @@ impl Core {
             body: &d.body,
             in_reply_to: parent.as_ref().and_then(|p| p.message_id.as_deref()),
             references: &refs,
+            attachments: &files,
         })?;
         let password = self.store.get_password(account.id)?;
         let raw = msg.formatted();
         smtp::send(&account.config, &password, msg).await?;
         if !account.config.server_saves_sent
-            && let Some((_, sent)) = self.store.find_mailbox(account.id, "\\Sent")
+            && let Some((_, sent)) = self.store.find_mailbox(account.id, SENT)
         {
             let r: Result<()> = async {
                 let mut s = imap_connect(&account.config, &password).await?;
@@ -384,7 +472,62 @@ impl Core {
         if let Some(id) = d.id {
             self.delete_draft(id)?;
         }
+        // Pasted images were saved by us just for this message.
+        let ours = self.pasted_dir();
+        for p in &d.attachments {
+            if Path::new(p).starts_with(&ours) {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+        // Only INBOX is watched live; fetch Sent now so the message shows up there. Servers that
+        // file sent mail themselves can take a moment.
+        if let Some((sent_id, _)) = self.store.find_mailbox(account.id, SENT)
+            && let Some(s) = self.syncs.lock().unwrap().get(&account.id)
+        {
+            let delay = if account.config.server_saves_sent { 2 } else { 0 };
+            s.sync_mailbox_after(sent_id, Duration::from_secs(delay));
+        }
         Ok(())
+    }
+
+    /// Where pasted images are written until the message is sent.
+    fn pasted_dir(&self) -> PathBuf {
+        self.data_dir.join("pasted")
+    }
+
+    /// Save a pasted image so it can be attached like any file. Returns its path.
+    pub fn save_pasted(&self, bytes: &[u8], ext: &str) -> Result<String> {
+        let dir = self.pasted_dir();
+        std::fs::create_dir_all(&dir)?;
+        let stamp = chrono::Local::now().format("%Y-%m-%d at %H.%M.%S");
+        let mut path = dir.join(format!("Image {stamp}.{ext}"));
+        let mut n = 2;
+        while path.exists() {
+            path = dir.join(format!("Image {stamp} ({n}).{ext}"));
+            n += 1;
+        }
+        std::fs::write(&path, bytes)?;
+        Ok(path.to_string_lossy().into_owned())
+    }
+
+    fn read_attachments(paths: &[String]) -> Result<Vec<smtp::OutgoingFile>> {
+        let mut total = 0usize;
+        let mut out = Vec::new();
+        for p in paths {
+            let path = Path::new(p);
+            let filename = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "attachment".into());
+            let data = std::fs::read(path).with_context(|| format!("can't read attachment {filename}"))?;
+            total += data.len();
+            out.push(smtp::OutgoingFile { content_type: smtp::content_type_for(&filename).into(), filename, data });
+        }
+        // Base64 grows mail by a third; Gmail and most servers stop at 25 MB.
+        if total * 4 / 3 > MAX_MESSAGE_BYTES {
+            return Err(anyhow!(
+                "Attachments are {:.1} MB; most mail servers reject messages over 25 MB",
+                total as f64 / 1_048_576.0
+            ));
+        }
+        Ok(out)
     }
 
     // ---------- settings ----------
@@ -430,5 +573,27 @@ impl Core {
         let s = self.store.get_settings();
         let running = self.mcp.lock().unwrap().is_some();
         McpInfo::new(s.mcp_enabled, running, self.mcp_error.lock().unwrap().clone(), s.mcp_port, &s.mcp_token)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attachment_names_stay_in_the_folder() {
+        assert_eq!(safe_filename("../../etc/passwd"), "_.._etc_passwd");
+        assert_eq!(safe_filename(".hidden"), "hidden");
+        assert_eq!(safe_filename("  "), "attachment");
+        assert_eq!(safe_filename("Relatório Q3.pdf"), "Relatório Q3.pdf");
+        let dir = std::env::temp_dir().join(format!("yamc-unique-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(unique_path(&dir, "a.pdf"), dir.join("a.pdf"));
+        std::fs::write(dir.join("a.pdf"), b"").unwrap();
+        std::fs::write(dir.join("a (2).pdf"), b"").unwrap();
+        assert_eq!(unique_path(&dir, "a.pdf"), dir.join("a (3).pdf"));
+        std::fs::write(dir.join("notes"), b"").unwrap();
+        assert_eq!(unique_path(&dir, "notes"), dir.join("notes (2)"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

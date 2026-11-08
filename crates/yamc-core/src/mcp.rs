@@ -209,7 +209,7 @@ impl Tools {
                     .filter(|b| b.account_id == a.id)
                     .map(|b| json!({ "mailbox_id": b.id, "path": b.path, "special_use": b.special_use }))
                     .collect();
-                json!({ "id": a.id, "name": a.name, "email": a.email, "kind": a.kind, "state": a.state, "folders": folders })
+                json!({ "id": a.id, "name": a.name, "sender_name": a.sender, "email": a.email, "kind": a.kind, "state": a.state, "folders": folders })
             })
             .collect();
         ok(json!(list))
@@ -274,9 +274,11 @@ impl Tools {
                 body: a.body,
                 reply_to: None,
                 created_by: None,
+                attachments: Vec::new(),
             }
         };
-        let id = self.core.save_draft(&DraftInput { created_by: Some("agent".into()), ..draft }).map_err(err)?;
+        // Agents never attach files: a draft must not be able to carry your files out.
+        let id = self.core.save_draft(&DraftInput { created_by: Some("agent".into()), attachments: Vec::new(), ..draft }).map_err(err)?;
         ok(json!({ "draft_id": id, "note": "Draft saved. The user will review and send it from yamc." }))
     }
 

@@ -10,6 +10,7 @@ mod list;
 mod settings;
 mod theme;
 mod thread;
+mod update;
 
 use gpui_kit::*;
 use yamc_core::core::{Core, default_data_dir};
@@ -18,7 +19,7 @@ gpui_kit::assets::icon_assets!(
     Icons,
     [
         Inbox, FilePen, Settings, ChevronRight, ChevronDown, Search, SearchX, Reply, ReplyAll, Paperclip, Image, Copy, Check,
-        Plus, Trash, ArrowLeft, Info, X, Archive, SquarePen, Mail
+        Plus, Trash, ArrowLeft, Info, X, Archive, SquarePen, Mail, Pencil, Send, Download, LoaderCircle
     ]
 );
 

@@ -48,6 +48,7 @@ pub enum Cmd {
     Back,
     GoInbox,
     GoDrafts,
+    GoSent,
     GoSettings,
     Search,
     ToggleSidebar,
@@ -132,6 +133,7 @@ pub const BINDINGS: &[Binding] = &[
     b!(&["<Esc>", "q", "h", "u"], T, "Reading", "Back to list", Back),
     // go
     b!(&["gi"], ALL, "Go", "Inbox", GoInbox),
+    b!(&["gt"], ALL, "Go", "Sent", GoSent),
     b!(&["gd"], ALL, "Go", "Drafts", GoDrafts),
     b!(&["gs"], ALL, "Go", "Settings", GoSettings),
     b!(&["/"], ALL, "Go", "Search", Search),

@@ -12,7 +12,26 @@ Yet another mail client: fast, minimal, dark by default, and drivable by AI agen
 
 See [SPEC.md](SPEC.md) for the design and roadmap.
 
-## Run
+## Install (macOS)
+
+```sh
+curl -fL https://github.com/krymancer/yamc/releases/latest/download/yamc-macos.zip -o /tmp/yamc.zip \
+  && ditto -x -k /tmp/yamc.zip /Applications && open /Applications/yamc.app
+```
+
+Installing from Terminal avoids Gatekeeper's warning about an app downloaded with a browser. The release isn't signed
+with an Apple Developer ID. If you download the zip in a browser instead, open the app once from System Settings →
+Privacy & Security → Open Anyway.
+
+yamc updates itself: it checks GitHub releases at launch and every 6 hours, installs a newer version in the background,
+then the sidebar shows **Restart to update**. yamc → Check for Updates… checks right away. macOS may ask once more for
+Keychain access after an update; choose Always Allow.
+
+To publish a release, run `scripts/release.sh 0.2.0` on a clean tree. It bumps the version, tags `v0.2.0` and pushes,
+and `.github/workflows/release.yml` builds the universal app and attaches `yamc-macos.zip` to the release.
+`scripts/bundle-macos.sh` builds the same zip locally into `dist/`.
+
+## Run from source
 
 The app is Rust + [GPUI](https://www.gpui.rs) ([gpui-kit](https://gpui-kit.com) components):
 

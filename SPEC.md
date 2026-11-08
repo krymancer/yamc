@@ -67,6 +67,11 @@ Passwords are sealed with AES-256-GCM using a key kept in the OS keychain (`secr
 - Remote images are blocked until `i`; "always for this sender" is remembered.
 - `O` opens the original in the system browser when the exact look matters.
 - Links open in the system browser.
+- Attachments aren't stored locally. Clicking one downloads it on the reader connection into `~/Downloads` (renamed `name (2).ext` if taken) and opens it; the arrow next to it is Save as….
+
+## Accounts
+
+- Each account has a **label** (shown in yamc) and a **sender name** (the From name on mail you send). Leave the sender name empty and yamc uses the name you most often send under in mail from that address it has already synced.
 
 ## Keyboard
 
@@ -95,7 +100,7 @@ Tools: `list_accounts`, `list_inbox`, `search`, `get_thread`, `create_draft`, `l
 
 1. **POC:** IMAP/SMTP password accounts (Gmail app password, Proton Bridge, generic), shared inbox, folders, conversation view, dark rendering, compose/reply/send, search, MCP server.
 2. Outlook OAuth, then Gmail OAuth.
-3. Attachments (download/attach), move to folder, per-account settings, packaging (AppImage/deb).
+3. ~~Attachments (download/attach)~~, move to folder, per-account settings, packaging (AppImage/deb).
 4. Profiling pass.
 
 ## Out of scope (for now)

@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS accounts (
   email TEXT NOT NULL,
   kind TEXT NOT NULL,
   color TEXT NOT NULL DEFAULT '',
+  sender_name TEXT,
   config TEXT NOT NULL,
   secret BLOB NOT NULL,
   created_at INTEGER NOT NULL
@@ -86,7 +87,8 @@ CREATE TABLE IF NOT EXISTS drafts (
   body TEXT NOT NULL DEFAULT '',
   reply_to INTEGER,
   created_by TEXT NOT NULL DEFAULT 'user',
-  updated_at INTEGER NOT NULL
+  updated_at INTEGER NOT NULL,
+  attachments TEXT NOT NULL DEFAULT '[]'
 );
 CREATE TABLE IF NOT EXISTS ops (
   id INTEGER PRIMARY KEY,
@@ -144,6 +146,7 @@ INSERT INTO mailbox_threads(mailbox_id, account_id, thread_id, last_date, all_se
   SELECT mailbox_id, account_id, thread_id, MAX(date), MIN(seen) FROM messages GROUP BY mailbox_id, account_id, thread_id;";
 
 pub const INBOX: &str = "\\Inbox";
+pub const SENT: &str = "\\Sent";
 const PAGE_MAX: usize = 1000;
 
 /// A message header as it comes off the wire, before it gets a thread.
@@ -228,6 +231,12 @@ pub struct AccountRow {
     pub email: String,
     pub kind: AccountKind,
     pub config: AccountConfig,
+    /// The From name set by hand; `None` means infer it from mail already sent.
+    pub sender_name: Option<String>,
+}
+
+fn non_empty(s: &str) -> Option<&str> {
+    Some(s.trim()).filter(|s| !s.is_empty())
 }
 
 fn addr_text(list: &[Address]) -> String {
@@ -301,6 +310,17 @@ impl Store {
     pub fn open(path: &Path, secrets: SecretBox) -> Result<Self> {
         let w = open(path)?;
         w.execute_batch(SCHEMA)?;
+        // Columns added after the first release.
+        let has_attachments: bool =
+            w.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('drafts') WHERE name = 'attachments')", [], |r| r.get(0))?;
+        if !has_attachments {
+            w.execute_batch("ALTER TABLE drafts ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]'")?;
+        }
+        let has_sender: bool =
+            w.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('accounts') WHERE name = 'sender_name')", [], |r| r.get(0))?;
+        if !has_sender {
+            w.execute_batch("ALTER TABLE accounts ADD COLUMN sender_name TEXT")?;
+        }
         let summary_empty: bool = w.query_row("SELECT NOT EXISTS(SELECT 1 FROM mailbox_threads)", [], |r| r.get(0))?;
         let has_messages: bool = w.query_row("SELECT EXISTS(SELECT 1 FROM messages)", [], |r| r.get(0))?;
         if summary_empty && has_messages {
@@ -366,10 +386,35 @@ impl Store {
         let secret = self.secrets.encrypt(&a.password)?;
         let c = self.w();
         c.execute(
-            "INSERT INTO accounts(name, email, kind, config, secret, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            params![a.name, a.email, a.kind.as_str(), json(&a.config), secret, now_ms()],
+            "INSERT INTO accounts(name, email, kind, config, secret, created_at, sender_name) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            params![a.name, a.email, a.kind.as_str(), json(&a.config), secret, now_ms(), non_empty(&a.sender_name)],
         )?;
         Ok(c.last_insert_rowid())
+    }
+
+    /// Set the label and the From name; an empty sender name goes back to inferring it.
+    pub fn rename_account(&self, id: i64, label: &str, sender_name: &str) -> Result<()> {
+        self.w().execute(
+            "UPDATE accounts SET name = ?, sender_name = ? WHERE id = ?",
+            params![label, non_empty(sender_name), id],
+        )?;
+        Ok(())
+    }
+
+    /// The name this address usually sends under, taken from synced mail (mostly the Sent
+    /// folder). The most frequent one wins, so one odd message doesn't change it.
+    pub fn inferred_sender_name(&self, account_id: i64, email: &str) -> Option<String> {
+        self.r()
+            .query_row(
+                "SELECT from_name FROM (
+                   SELECT from_name, date FROM messages
+                   WHERE account_id = ? AND from_addr = ? COLLATE NOCASE AND from_name IS NOT NULL AND from_name != ''
+                   ORDER BY date DESC LIMIT 200)
+                 GROUP BY from_name ORDER BY COUNT(*) DESC, MAX(date) DESC LIMIT 1",
+                params![account_id, email],
+                |r| r.get(0),
+            )
+            .ok()
     }
 
     pub fn remove_account(&self, id: i64) -> Result<()> {
@@ -379,7 +424,7 @@ impl Store {
 
     pub fn list_accounts(&self) -> Vec<AccountRow> {
         let c = self.r();
-        let mut st = c.prepare_cached("SELECT id, name, email, kind, config FROM accounts ORDER BY id").expect("accounts");
+        let mut st = c.prepare_cached("SELECT id, name, email, kind, config, sender_name FROM accounts ORDER BY id").expect("accounts");
         st.query_map([], |r| {
             Ok(AccountRow {
                 id: r.get(0)?,
@@ -389,6 +434,7 @@ impl Store {
                 config: serde_json::from_str(&r.get::<_, String>(4)?).map_err(|e| {
                     rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(e))
                 })?,
+                sender_name: r.get(5)?,
             })
         })
         .expect("accounts")
@@ -721,12 +767,13 @@ impl Store {
         type G = (i64, String, i64, bool);
         let map = |r: &Row| -> rusqlite::Result<G> { Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)) };
         let groups: Vec<G> = match view {
-            View::Inbox | View::Mailbox(_) => {
+            View::Inbox | View::Sent | View::Mailbox(_) => {
                 let ids: Vec<i64> = match view {
                     View::Mailbox(id) => vec![*id],
                     _ => {
+                        let special = if *view == View::Sent { SENT } else { INBOX };
                         let mut st = c.prepare_cached("SELECT id FROM mailboxes WHERE special_use = ?").expect("inbox");
-                        st.query_map([INBOX], |r| r.get(0)).expect("inbox").flatten().collect()
+                        st.query_map([special], |r| r.get(0)).expect("inbox").flatten().collect()
                     }
                 };
                 // Unread first, then newest. Each folder is an index range scan; folders from
@@ -761,7 +808,29 @@ impl Store {
             }
             View::Drafts => return Vec::new(),
         };
-        Self::decorate(&c, groups)
+        let rows = Self::decorate(&c, groups);
+        if *view == View::Sent { Self::show_recipients(&c, rows) } else { rows }
+    }
+
+    /// In Sent, who you wrote to matters more than who wrote: label rows with the recipients
+    /// of your latest sent message in the conversation.
+    fn show_recipients(c: &Connection, rows: Vec<ThreadRow>) -> Vec<ThreadRow> {
+        let mut st = c
+            .prepare_cached(
+                "SELECT m.to_json FROM messages m JOIN mailboxes b ON b.id = m.mailbox_id
+                 WHERE m.account_id = ? AND m.thread_id = ? AND b.special_use = ? ORDER BY m.date DESC LIMIT 1",
+            )
+            .expect("sent to");
+        rows.into_iter()
+            .map(|mut r| {
+                let to: Vec<Address> = parse_json(st.query_row(params![r.account_id, r.thread_id, SENT], |x| x.get(0)).ok());
+                if !to.is_empty() {
+                    let names: Vec<&str> = to.iter().map(|a| a.display()).collect();
+                    r.from = format!("To: {}", names.join(", "));
+                }
+                r
+            })
+            .collect()
     }
 
     fn decorate(c: &Connection, groups: Vec<(i64, String, i64, bool)>) -> Vec<ThreadRow> {
@@ -887,6 +956,7 @@ impl Store {
             reply_to: r.get("reply_to")?,
             created_by: r.get("created_by")?,
             updated_at: r.get("updated_at")?,
+            attachments: parse_json(r.get("attachments")?),
         })
     }
 
@@ -905,16 +975,16 @@ impl Store {
         let now = now_ms();
         if let Some(id) = d.id {
             let n = c.execute(
-                "UPDATE drafts SET account_id = ?, to_list = ?, cc_list = ?, subject = ?, body = ?, reply_to = ?, updated_at = ? WHERE id = ?",
-                params![d.account_id, d.to, d.cc, d.subject, d.body, d.reply_to, now, id],
+                "UPDATE drafts SET account_id = ?, to_list = ?, cc_list = ?, subject = ?, body = ?, reply_to = ?, attachments = ?, updated_at = ? WHERE id = ?",
+                params![d.account_id, d.to, d.cc, d.subject, d.body, d.reply_to, json(&d.attachments), now, id],
             )?;
             if n > 0 {
                 return Ok(id);
             }
         }
         c.execute(
-            "INSERT INTO drafts(account_id, to_list, cc_list, subject, body, reply_to, created_by, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            params![d.account_id, d.to, d.cc, d.subject, d.body, d.reply_to, d.created_by.as_deref().unwrap_or("user"), now],
+            "INSERT INTO drafts(account_id, to_list, cc_list, subject, body, reply_to, created_by, attachments, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            params![d.account_id, d.to, d.cc, d.subject, d.body, d.reply_to, d.created_by.as_deref().unwrap_or("user"), json(&d.attachments), now],
         )?;
         Ok(c.last_insert_rowid())
     }

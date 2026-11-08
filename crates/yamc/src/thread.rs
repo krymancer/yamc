@@ -1,6 +1,7 @@
 //! A conversation: messages stacked Gmail-style, latest and unread expanded.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -32,7 +33,18 @@ pub struct ThreadView {
     /// Messages whose remote images are allowed.
     images_on: HashSet<i64>,
     images: Images,
+    /// Attachment downloads in flight or failed, by (message id, attachment index).
+    downloads: HashMap<(i64, usize), Download>,
     pub scroll: ScrollHandle,
+}
+
+enum Download {
+    Busy,
+    Failed(String),
+}
+
+fn downloads_dir() -> PathBuf {
+    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(".")).join("Downloads")
 }
 
 fn initials(m: &Message) -> String {
@@ -59,6 +71,7 @@ impl ThreadView {
             loading: HashSet::new(),
             images_on: HashSet::new(),
             images,
+            downloads: HashMap::new(),
             scroll: ScrollHandle::new(),
         };
         this.reload(true, cx);
@@ -107,6 +120,59 @@ impl ThreadView {
             })
             .detach();
         }
+    }
+
+    /// Download an attachment into ~/Downloads and open it with its default app.
+    fn open_attachment(&mut self, id: i64, index: usize, cx: &mut Context<Self>) {
+        if matches!(self.downloads.get(&(id, index)), Some(Download::Busy)) {
+            return;
+        }
+        let core = self.core.clone();
+        let task = self.core.runtime().spawn(async move { core.save_attachment(id, index, &downloads_dir()).await });
+        self.track(id, index, task, |path, cx| cx.open_with_system(&path), cx);
+    }
+
+    /// Ask where to save, then download there.
+    fn save_attachment_as(&mut self, id: i64, index: usize, name: String, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_new_path(&downloads_dir(), Some(&name));
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(path))) = rx.await else { return };
+            let _ = this.update(cx, |this, cx| {
+                let core = this.core.clone();
+                let target = path.clone();
+                let task = this.core.runtime().spawn(async move { core.save_attachment_as(id, index, &target).await.map(|_| target) });
+                this.track(id, index, task, |path, cx| cx.reveal_path(&path), cx);
+            });
+        })
+        .detach();
+    }
+
+    fn track(
+        &mut self,
+        id: i64,
+        index: usize,
+        task: tokio::task::JoinHandle<anyhow::Result<PathBuf>>,
+        done: impl FnOnce(PathBuf, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        self.downloads.insert((id, index), Download::Busy);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let r = task.await.map_err(anyhow::Error::from).and_then(|r| r);
+            let _ = this.update(cx, |this, cx| {
+                match r {
+                    Ok(path) => {
+                        this.downloads.remove(&(id, index));
+                        done(path, cx);
+                    }
+                    Err(e) => {
+                        this.downloads.insert((id, index), Download::Failed(format!("{e:#}")));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn fetch_images(&mut self, cx: &mut Context<Self>) {
@@ -327,18 +393,56 @@ impl ThreadView {
             });
 
         let attachments = (!m.attachments.is_empty()).then(|| {
-            h_flex().px_4().pb_3().pl(px(60.)).gap_2().flex_wrap().children(m.attachments.iter().map(|a| {
+            let mid = m.id;
+            h_flex().px_4().pb_3().pl(px(60.)).gap_2().flex_wrap().children(m.attachments.iter().enumerate().map(|(i, a)| {
+                let state = self.downloads.get(&(mid, i));
+                let busy = matches!(state, Some(Download::Busy));
+                let failed = match state {
+                    Some(Download::Failed(e)) => Some(e.clone()),
+                    _ => None,
+                };
+                let name = a.filename.clone();
+                let key = (mid as u64) << 16 | i as u64;
                 h_flex()
-                    .gap_1()
-                    .px_2()
-                    .py_1()
                     .rounded_md()
                     .border_1()
-                    .border_color(pal.line)
+                    .border_color(if failed.is_some() { pal.danger } else { pal.line })
                     .text_xs()
                     .text_color(pal.muted)
-                    .child(Icon::new(IconName::Paperclip).size_3())
-                    .child(format!("{} · {} KB", a.filename, a.size.div_ceil(1024)))
+                    .child(
+                        h_flex()
+                            .id(("att", key))
+                            .gap_1()
+                            .pl_2()
+                            .pr_1()
+                            .py_1()
+                            .rounded_l_md()
+                            .cursor_pointer()
+                            .hover(|d| d.bg(pal.hover).text_color(pal.strong))
+                            .child(Icon::new(if busy { IconName::LoaderCircle } else { IconName::Paperclip }).size_3())
+                            .child(format!("{} · {}", a.filename, size_label(a.size)))
+                            .when(busy, |d| d.child(div().text_color(pal.faint).child("downloading…")))
+                            .when_some(failed.clone(), |d, e| d.child(div().text_color(pal.danger).child("failed — click to retry")).tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(e.clone()).build(w, cx)))
+                            .when(failed.is_none() && !busy, |d| d.tooltip(|w, cx| gpui_kit::component::tooltip::Tooltip::new("Open (saves to Downloads)").build(w, cx)))
+                            .on_click(cx.listener(move |this, _, _, cx| this.open_attachment(mid, i, cx))),
+                    )
+                    .child(
+                        div()
+                            .id(("att-save", key))
+                            .px_1()
+                            .py_1()
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .rounded_r_md()
+                            .border_l_1()
+                            .border_color(pal.line)
+                            .cursor_pointer()
+                            .hover(|d| d.bg(pal.hover).text_color(pal.strong))
+                            .tooltip(|w, cx| gpui_kit::component::tooltip::Tooltip::new("Save as…").build(w, cx))
+                            .child(Icon::new(IconName::Download).size_3())
+                            .on_click(cx.listener(move |this, _, _, cx| this.save_attachment_as(mid, i, name.clone(), cx))),
+                    )
             }))
         });
 
@@ -408,4 +512,11 @@ pub fn kbd(k: &str, pal: &Palette) -> Div {
         .text_color(pal.muted)
         .text_xs()
         .child(k.to_string())
+}
+
+fn size_label(bytes: u64) -> String {
+    match bytes {
+        b if b < 1024 * 1024 => format!("{} KB", b.div_ceil(1024)),
+        b => format!("{:.1} MB", b as f64 / (1024.0 * 1024.0)),
+    }
 }
