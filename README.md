@@ -45,7 +45,7 @@ with a self-made certificate, not an Apple Developer ID. If you download the zip
 once from System Settings → Privacy & Security → Open Anyway.
 
 yamc updates itself: it checks GitHub releases at launch and every 6 hours, installs a newer version in the background,
-then the sidebar shows **Restart to update**. yamc → Check for Updates… checks right away. It only installs builds
+then the top bar shows **Restart to update**. The refresh button in the top bar (or yamc → Check for Updates…) checks right away. It only installs builds
 signed with the release certificate. Every release carries the same signature, so after you choose Always Allow
 once, macOS stops asking for Keychain access on updates.
 

@@ -1,6 +1,6 @@
 //! Self-update from GitHub releases. The installed app checks shortly after launch and every
 //! few hours; a newer release is downloaded and swapped into place in the background, then the
-//! sidebar offers a restart. Builds run from `target/` (development) never update themselves.
+//! top bar offers a restart. Builds run from `target/` (development) never update themselves.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -103,6 +103,12 @@ impl Updater {
             });
         })
         .detach();
+    }
+
+    /// Whether this copy can replace itself. Builds run from source (`cargo run`) can't, so they
+    /// show no update button.
+    pub fn can_update(&self) -> bool {
+        self.bundle.is_some()
     }
 
     /// Quit and open the freshly installed app.

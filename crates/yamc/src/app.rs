@@ -655,7 +655,7 @@ impl Yamc {
     }
 
     fn render_sidebar(&self, pal: &Palette, cx: &mut Context<Self>) -> impl IntoElement {
-        let header = self.title_drag(h_flex().id("sidebar-title").h(px(TITLE_H)).flex_none().pl(px(TRAFFIC_LIGHTS_W)).pr_3().gap_2(), cx);
+        let header = self.title_drag(h_flex().id("sidebar-title").h(px(TITLE_H)).flex_none(), cx);
         let compose = h_flex()
             .id("compose")
             .mx_2()
@@ -684,23 +684,7 @@ impl Yamc {
             .border_color(pal.line)
             .pb_3()
             .gap_0p5()
-            .child(
-                header
-                    .child(
-                        div()
-                            .size(px(22.))
-                            .rounded_md()
-                            .bg(pal.accent)
-                            .text_color(pal.accent_fg)
-                            .text_sm()
-                            .font_weight(FontWeight::BOLD)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child("y"),
-                    )
-                    .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(pal.strong).child("yamc")),
-            )
+            .child(header)
             .child(compose)
             .child(
                 self.nav("nav-inbox", Some(IconName::Inbox), "Inbox".into(), self.screen == Screen::View(View::Inbox), pal)
@@ -768,31 +752,58 @@ impl Yamc {
         )
     }
 
-    /// Sidebar line for an update in progress, ready, or a check you asked for.
+    /// Sidebar line explaining a failed update; the topbar button only shows that it failed.
     fn render_update(&self, pal: &Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let status = self.updater.read(cx).status.clone();
-        let line = |text: String, color: Hsla| div().px_4().py_1().text_xs().text_color(color).child(text).into_any_element();
+        let UpdateStatus::Failed(e) = self.updater.read(cx).status.clone() else { return None };
+        Some(div().px_4().py_1().text_xs().text_color(pal.danger).child(e).into_any_element())
+    }
+
+    /// Topbar button: check for updates, show progress, and restart once one is installed.
+    fn render_update_button(&self, pal: &Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let updater = self.updater.read(cx);
+        if !updater.can_update() {
+            return None;
+        }
+        let status = updater.status.clone();
+        let base = h_flex()
+            .id("update")
+            .flex_none()
+            .h(px(28.))
+            .px_2()
+            .gap_1p5()
+            .rounded_md()
+            .text_sm()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
         Some(match status {
-            UpdateStatus::Idle | UpdateStatus::Checking => return None,
-            UpdateStatus::UpToDate => line(format!("yamc {} is up to date", crate::update::VERSION), pal.faint),
-            UpdateStatus::Downloading(v) => line(format!("Downloading yamc {v}…"), pal.faint),
-            UpdateStatus::Failed(e) => line(e, pal.danger),
-            UpdateStatus::Ready(v) => h_flex()
-                .id("update-restart")
-                .mx_2()
-                .mb_1()
-                .px_2()
-                .h(px(30.))
-                .gap_2()
-                .rounded_md()
+            UpdateStatus::Ready(v) => base
                 .bg(pal.accent)
                 .text_color(pal.accent_fg)
-                .text_sm()
                 .cursor_pointer()
                 .child(Icon::new(IconName::Download).size_4())
                 .child(format!("Restart to update to {v}"))
                 .on_click(cx.listener(|this, _, _, cx| this.updater.update(cx, |u, cx| u.restart(cx))))
                 .into_any_element(),
+            UpdateStatus::Checking | UpdateStatus::Downloading(_) => {
+                let label = match &status {
+                    UpdateStatus::Downloading(v) => format!("Downloading {v}…"),
+                    _ => "Checking…".into(),
+                };
+                base.text_color(pal.faint).child(Icon::new(IconName::LoaderCircle).size_4()).child(label).into_any_element()
+            }
+            other => {
+                let (icon, label, color) = match other {
+                    UpdateStatus::UpToDate => (IconName::Check, Some("Up to date".to_string()), pal.muted),
+                    UpdateStatus::Failed(_) => (IconName::RefreshCw, Some("Update failed".to_string()), pal.danger),
+                    _ => (IconName::RefreshCw, None, pal.muted),
+                };
+                base.text_color(color)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(pal.hover).text_color(pal.strong))
+                    .child(Icon::new(icon).size_4())
+                    .children(label)
+                    .on_click(cx.listener(|this, _, _, cx| this.updater.update(cx, |u, cx| u.check(true, cx))))
+                    .into_any_element()
+            }
         })
     }
 
@@ -863,6 +874,7 @@ impl Yamc {
         .child(title_el)
         .children(actions)
         .child(div().flex_1())
+        .children(self.render_update_button(pal, cx))
         .child(
             h_flex()
                 .w(px(320.))
