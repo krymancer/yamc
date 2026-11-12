@@ -1,13 +1,13 @@
 #!/bin/bash
 # Build yamc.app and zip it as dist/yamc-macos.zip (the asset the in-app updater looks for).
 #
-#   TARGETS        Rust targets to build and merge (default: Apple Silicon + Intel)
+#   TARGETS        Rust targets to build and merge (default: Apple Silicon only)
 #   SIGN_IDENTITY  codesign identity (default "-": ad-hoc, no certificate)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/yamc/Cargo.toml | head -1)
-TARGETS=${TARGETS:-"aarch64-apple-darwin x86_64-apple-darwin"}
+TARGETS=${TARGETS:-"aarch64-apple-darwin"}
 SIGN_IDENTITY=${SIGN_IDENTITY:--}
 export MACOSX_DEPLOYMENT_TARGET=11.0
 

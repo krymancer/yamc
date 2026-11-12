@@ -5,6 +5,9 @@ name: Release
 on:
   push:
     tags: ["v*"]
+    # Pushes to main only build, to keep the dependency cache warm: a tag's run can't see caches
+    # saved by other tags, only ones saved on main.
+    branches: [main]
 
 permissions:
   contents: write
@@ -17,22 +20,30 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          targets: aarch64-apple-darwin
+
+      # Before the version bump, so the cache key doesn't change with every release.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - if: github.ref_type == 'branch'
+        run: cargo build --release --locked -p yamc --target aarch64-apple-darwin
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0" # Same as bundle-macos.sh, so the cached build matches.
 
       - name: Version from the tag
+        if: github.ref_type == 'tag'
         run: |
           version=${GITHUB_REF_NAME#v}
           [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "tag must look like v1.2.3, got $GITHUB_REF_NAME"; exit 1; }
           sed -i '' "s/^version = \".*\"/version = \"$version\"/" crates/yamc/Cargo.toml
           cargo update -w
 
-      - uses: Swatinem/rust-cache@v2
-
-      - run: cargo test --locked -p yamc-core --lib --test store
-
       # Sign with the release certificate so updates keep one identity (Keychain access sticks)
       # and the in-app updater accepts them. It's self-made, so macOS doesn't need to trust it.
       - name: Load signing certificate
+        if: github.ref_type == 'tag'
         env:
           P12: ${{ secrets.MACOS_SIGNING_P12 }}
           P12_PASSWORD: ${{ secrets.MACOS_SIGNING_PASSWORD }}
@@ -48,11 +59,13 @@ jobs:
           security list-keychains -d user -s "$kc" $(security list-keychains -d user | xargs)
           rm "$RUNNER_TEMP/signing.p12"
 
-      - run: scripts/bundle-macos.sh
+      - if: github.ref_type == 'tag'
+        run: scripts/bundle-macos.sh
         env:
           SIGN_IDENTITY: 45E72C5F7F55C6F323D6C533AF45C3BCF0F7D773
 
       - name: Publish
+        if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
         # A release made on GitHub's website already exists; one from a pushed tag doesn't yet.

@@ -59,7 +59,7 @@ To publish a release, push a version tag, or create a release with a new `v…` 
 git tag -a v0.2.0 -m v0.2.0 && git push origin v0.2.0
 ```
 
-`.github/workflows/release.yml` builds the universal app with the tag's version and attaches `yamc-macos.zip` to the
+`.github/workflows/release.yml` builds the Apple Silicon app with the tag's version and attaches `yamc-macos.zip` to the
 release. `scripts/bundle-macos.sh` builds the same zip locally into `dist/`.
 
 ## Run from source
