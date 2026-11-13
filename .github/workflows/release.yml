@@ -17,6 +17,8 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Release notes come from the commits since the previous tag.
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -73,5 +75,6 @@ jobs:
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" dist/yamc-macos.zip --clobber
           else
-            gh release create "$GITHUB_REF_NAME" dist/yamc-macos.zip --title "yamc ${GITHUB_REF_NAME#v}" --generate-notes
+            scripts/release-notes.sh "$GITHUB_REF_NAME" > "$RUNNER_TEMP/notes.md"
+            gh release create "$GITHUB_REF_NAME" dist/yamc-macos.zip --title "yamc ${GITHUB_REF_NAME#v}" --notes-file "$RUNNER_TEMP/notes.md"
           fi

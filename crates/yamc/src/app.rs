@@ -14,13 +14,13 @@ use yamc_core::types::{Account, CoreEvent, Draft, DraftInput, Mailbox, ThreadRow
 
 use crate::body::Images;
 use crate::composer::{Composer, ComposerEvent};
-use crate::format::short_date;
+use crate::format::{ago, short_date};
 use crate::keys::{BINDINGS, Cmd, Feed, KeyEngine, Mode, key_token, pretty};
 use crate::menus;
 use crate::list::{PAGE, ROW, Screen as ScreenPos, ThreadList};
 use crate::settings::SettingsView;
 use crate::theme::{self, Palette};
-use crate::update::{Status as UpdateStatus, Updater};
+use crate::update::{ReleaseInfo, Status as UpdateStatus, Updater};
 use crate::thread::{ThreadEvent, ThreadView, kbd};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -746,65 +746,56 @@ impl Yamc {
                 }
             }
         }
-        col.child(div().flex_1()).children(self.render_update(pal, cx)).child(
-            self.nav("nav-settings", Some(IconName::Settings), "Settings".into(), self.screen == Screen::Settings, pal)
-                .on_click(cx.listener(|this, _, _, cx| this.go(Screen::Settings, cx))),
-        )
+        col.child(div().flex_1()).child(self.render_footer(pal, cx))
     }
 
-    /// Sidebar line explaining a failed update; the topbar button only shows that it failed.
-    fn render_update(&self, pal: &Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let UpdateStatus::Failed(e) = self.updater.read(cx).status.clone() else { return None };
-        Some(div().px_4().py_1().text_xs().text_color(pal.danger).child(e).into_any_element())
+    /// Bottom of the sidebar: Settings on the left, updates on the right.
+    fn render_footer(&self, pal: &Palette, cx: &mut Context<Self>) -> impl IntoElement {
+        let on = self.screen == Screen::Settings;
+        let gear = footer_button("nav-settings", pal)
+            .text_color(if on { pal.strong } else { pal.muted })
+            .when(on, |d| d.bg(pal.hover))
+            .tooltip(|w, cx| gpui_kit::component::tooltip::Tooltip::new("Settings").build(w, cx))
+            .on_click(cx.listener(|this, _, _, cx| this.go(Screen::Settings, cx)))
+            .child(Icon::new(IconName::Settings).size_4());
+        h_flex().px_2().pt_1().child(gear).child(div().flex_1()).children(self.render_update_button(pal, cx))
     }
 
-    /// Topbar button: check for updates, show progress, and restart once one is installed.
+    /// Checks for updates on click, restarts once one is installed; hover for what's going on
+    /// and what the new version brings. Source builds can't update, so they don't get one.
     fn render_update_button(&self, pal: &Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
         let updater = self.updater.read(cx);
         if !updater.can_update() {
             return None;
         }
         let status = updater.status.clone();
-        let base = h_flex()
-            .id("update")
-            .flex_none()
-            .h(px(28.))
-            .px_2()
-            .gap_1p5()
-            .rounded_md()
-            .text_sm()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
-        Some(match status {
-            UpdateStatus::Ready(v) => base
-                .bg(pal.accent)
-                .text_color(pal.accent_fg)
-                .cursor_pointer()
-                .child(Icon::new(IconName::Download).size_4())
-                .child(format!("Restart to update to {v}"))
-                .on_click(cx.listener(|this, _, _, cx| this.updater.update(cx, |u, cx| u.restart(cx))))
+        let release = updater.release.clone();
+        let ready = matches!(status, UpdateStatus::Ready(_));
+        let busy = matches!(status, UpdateStatus::Checking | UpdateStatus::Downloading(_));
+        let (icon, color) = match &status {
+            UpdateStatus::Ready(_) => (IconName::Download, pal.strong),
+            UpdateStatus::Checking | UpdateStatus::Downloading(_) => (IconName::LoaderCircle, pal.faint),
+            UpdateStatus::Failed(_) => (IconName::RefreshCw, pal.danger),
+            _ => (IconName::RefreshCw, pal.muted),
+        };
+        let trigger = footer_button("update", pal)
+            .relative()
+            .text_color(color)
+            .when(busy, |d| d.cursor_default())
+            .child(Icon::new(icon).size_4())
+            .when(ready, |d| d.child(div().absolute().top(px(4.)).right(px(4.)).size(px(6.)).rounded_full().bg(pal.accent)))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.updater.update(cx, |u, cx| if ready { u.restart(cx) } else { u.check(true, cx) })
+            }));
+        let pal = pal.clone();
+        Some(
+            gpui_kit::component::hover_card::HoverCard::new("update-card")
+                .anchor(Anchor::BottomLeft)
+                .open_delay(Duration::from_millis(250))
+                .trigger(trigger)
+                .content(move |_, _, _| update_card(&status, release.as_ref(), &pal))
                 .into_any_element(),
-            UpdateStatus::Checking | UpdateStatus::Downloading(_) => {
-                let label = match &status {
-                    UpdateStatus::Downloading(v) => format!("Downloading {v}…"),
-                    _ => "Checking…".into(),
-                };
-                base.text_color(pal.faint).child(Icon::new(IconName::LoaderCircle).size_4()).child(label).into_any_element()
-            }
-            other => {
-                let (icon, label, color) = match other {
-                    UpdateStatus::UpToDate => (IconName::Check, Some("Up to date".to_string()), pal.muted),
-                    UpdateStatus::Failed(_) => (IconName::RefreshCw, Some("Update failed".to_string()), pal.danger),
-                    _ => (IconName::RefreshCw, None, pal.muted),
-                };
-                base.text_color(color)
-                    .cursor_pointer()
-                    .hover(|s| s.bg(pal.hover).text_color(pal.strong))
-                    .child(Icon::new(icon).size_4())
-                    .children(label)
-                    .on_click(cx.listener(|this, _, _, cx| this.updater.update(cx, |u, cx| u.check(true, cx))))
-                    .into_any_element()
-            }
-        })
+        )
     }
 
     fn icon_button(&self, id: &'static str, icon: IconName, label: &'static str, key: &'static str, pal: &Palette) -> Stateful<Div> {
@@ -874,7 +865,6 @@ impl Yamc {
         .child(title_el)
         .children(actions)
         .child(div().flex_1())
-        .children(self.render_update_button(pal, cx))
         .child(
             h_flex()
                 .w(px(320.))
@@ -1262,4 +1252,71 @@ impl Render for Yamc {
             })
             .when(self.help, |d| d.child(self.render_help(&pal, cx)))
     }
+}
+
+/// A square icon button for the sidebar's bottom row.
+fn footer_button(id: &'static str, pal: &Palette) -> Stateful<Div> {
+    div().id(id).size(px(28.)).flex().items_center().justify_center().rounded_md().cursor_pointer().hover(|s| s.bg(pal.hover).text_color(pal.strong))
+}
+
+/// What the update button's hover card says.
+fn update_card(status: &UpdateStatus, release: Option<&ReleaseInfo>, pal: &Palette) -> AnyElement {
+    const MAX_NOTES: usize = 6;
+    let current = crate::update::VERSION;
+    let (title, title_color, sub, hint): (String, Hsla, Option<String>, Option<String>) = match status {
+        UpdateStatus::Ready(v) => ("Update ready".into(), pal.strong, Some(v.clone()), Some(format!("Click to restart into {v}."))),
+        UpdateStatus::Downloading(v) => (format!("Downloading {v}…"), pal.strong, None, None),
+        UpdateStatus::Checking => ("Checking for updates…".into(), pal.strong, None, None),
+        UpdateStatus::UpToDate => ("Up to date".into(), pal.strong, Some(format!("yamc {current}")), Some("Click to check again.".into())),
+        UpdateStatus::Failed(e) => ("Update failed".into(), pal.danger, Some(e.clone()), Some("Click to try again.".into())),
+        UpdateStatus::Idle => (format!("yamc {current}"), pal.strong, None, Some("Click to check for updates.".into())),
+    };
+    let fresh = matches!(status, UpdateStatus::Ready(_) | UpdateStatus::Downloading(_));
+    let release = release.filter(|_| fresh);
+    let sub = match (sub, release.and_then(|r| r.published_ms)) {
+        (Some(s), Some(ms)) if matches!(status, UpdateStatus::Ready(_)) => Some(format!("{s} · {}", ago(ms))),
+        (s, _) => s,
+    };
+    let notes = release.map(|r| r.notes.as_slice()).unwrap_or_default();
+    let bold = HighlightStyle { font_weight: Some(FontWeight::SEMIBOLD), color: Some(pal.strong), ..Default::default() };
+    v_flex()
+        .w(px(340.))
+        .gap_2()
+        .text_sm()
+        .text_color(pal.text)
+        .child(
+            v_flex()
+                .child(div().font_weight(FontWeight::SEMIBOLD).text_color(title_color).child(title))
+                .children(sub.map(|s| div().text_xs().text_color(pal.faint).child(s))),
+        )
+        .when(!notes.is_empty(), |d| {
+            d.child(v_flex().gap_1p5().children(notes.iter().take(MAX_NOTES).map(|n| {
+                let (text, highlights) = match &n.title {
+                    Some(t) => (format!("{t} {}", n.text), vec![(0..t.len(), bold)]),
+                    None => (n.text.clone(), vec![]),
+                };
+                h_flex()
+                    .items_start()
+                    .gap_2()
+                    .child(div().text_color(pal.faint).child("•"))
+                    .child(div().flex_1().min_w_0().child(StyledText::new(text).with_highlights(highlights)))
+            })))
+            .when(notes.len() > MAX_NOTES, |d| d.child(div().text_color(pal.muted).child(format!("Plus {} more.", notes.len() - MAX_NOTES))))
+        })
+        .when_some(release.map(|r| r.page.clone()).filter(|p| !p.is_empty()), |d, page| {
+            d.child(
+                h_flex()
+                    .id("release-page")
+                    .gap_1()
+                    .text_xs()
+                    .text_color(pal.muted)
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(pal.strong))
+                    .on_click(move |_, _, cx| cx.open_url(&page))
+                    .child("Release notes on GitHub")
+                    .child(Icon::new(IconName::ExternalLink).size_3()),
+            )
+        })
+        .children(hint.map(|h| div().text_xs().text_color(pal.faint).child(h)))
+        .into_any_element()
 }

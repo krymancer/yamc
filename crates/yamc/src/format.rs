@@ -20,3 +20,15 @@ pub fn short_date(ms: i64) -> String {
 pub fn long_date(ms: i64) -> String {
     local(ms).map(|d| d.format("%b %-d, %Y, %H:%M").to_string()).unwrap_or_default()
 }
+
+/// "just now", "5m ago", "3h ago", "2d ago", then the short date.
+pub fn ago(ms: i64) -> String {
+    let secs = (chrono::Utc::now().timestamp_millis() - ms) / 1000;
+    match secs {
+        ..60 => "just now".into(),
+        60..3600 => format!("{}m ago", secs / 60),
+        3600..86_400 => format!("{}h ago", secs / 3600),
+        86_400..604_800 => format!("{}d ago", secs / 86_400),
+        _ => short_date(ms),
+    }
+}

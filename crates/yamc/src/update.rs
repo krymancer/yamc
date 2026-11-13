@@ -1,6 +1,7 @@
 //! Self-update from GitHub releases. The installed app checks shortly after launch and every
 //! few hours; a newer release is downloaded and swapped into place in the background, then the
-//! top bar offers a restart. Builds run from `target/` (development) never update themselves.
+//! update button at the bottom of the sidebar offers a restart (hover it for the release notes).
+//! Builds run from `target/` (development) never update themselves.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -32,11 +33,31 @@ pub enum Status {
     Failed(String),
 }
 
+/// What a newer release says about itself, shown when you hover the update button.
+#[derive(Clone, Debug)]
+pub struct ReleaseInfo {
+    pub version: String,
+    /// Unix milliseconds, if GitHub gave a date.
+    pub published_ms: Option<i64>,
+    pub notes: Vec<Note>,
+    /// The release page on GitHub.
+    pub page: String,
+}
+
+/// One bullet of release notes: `- **Title.** Text`, or just `- Text`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Note {
+    pub title: Option<String>,
+    pub text: String,
+}
+
 pub struct Updater {
     rt: Handle,
     /// The running `.app`, or `None` for a development build.
     bundle: Option<PathBuf>,
     pub status: Status,
+    /// The newer release being downloaded or waiting for a restart.
+    pub release: Option<ReleaseInfo>,
     _poll: Task<()>,
 }
 
@@ -52,7 +73,7 @@ impl Updater {
                 cx.background_executor().timer(EVERY).await;
             }
         });
-        Self { rt, bundle, status: Status::Idle, _poll: poll }
+        Self { rt, bundle, status: Status::Idle, release: None, _poll: poll }
     }
 
     /// Look for a newer release and install it. `manual` reports "up to date" and errors;
@@ -88,8 +109,9 @@ impl Updater {
                     return;
                 }
             };
-            let version = release.version.clone();
+            let version = release.info.version.clone();
             let _ = this.update(cx, |this, cx| {
+                this.release = Some(release.info.clone());
                 this.status = Status::Downloading(version.clone());
                 cx.notify();
             });
@@ -132,7 +154,8 @@ fn running_bundle() -> Option<PathBuf> {
 }
 
 struct Release {
-    version: String,
+    info: ReleaseInfo,
+    /// The zip to download.
     url: String,
 }
 
@@ -163,7 +186,29 @@ async fn latest() -> Result<Option<Release>> {
         .find(|a| a["name"].as_str() == Some(ASSET))
         .and_then(|a| a["browser_download_url"].as_str())
         .ok_or_else(|| anyhow!("release {tag} has no {ASSET}"))?;
-    Ok(Some(Release { version, url: url.to_string() }))
+    let info = ReleaseInfo {
+        version,
+        published_ms: json["published_at"].as_str().and_then(|d| chrono::DateTime::parse_from_rfc3339(d).ok()).map(|d| d.timestamp_millis()),
+        notes: parse_notes(json["body"].as_str().unwrap_or_default()),
+        page: json["html_url"].as_str().unwrap_or_default().to_string(),
+    };
+    Ok(Some(Release { info, url: url.to_string() }))
+}
+
+/// The bullets of a release's notes; anything that isn't a bullet (headings, links) is dropped.
+fn parse_notes(body: &str) -> Vec<Note> {
+    body.lines()
+        .filter_map(|l| l.trim().strip_prefix("- ").or_else(|| l.trim().strip_prefix("* ")))
+        .map(|item| {
+            if let Some(rest) = item.strip_prefix("**")
+                && let Some((title, text)) = rest.split_once("**")
+            {
+                return Note { title: Some(title.trim().to_string()), text: text.trim().to_string() };
+            }
+            Note { title: None, text: item.trim().to_string() }
+        })
+        .filter(|n| n.title.is_some() || !n.text.is_empty())
+        .collect()
 }
 
 fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
@@ -227,7 +272,19 @@ fn run(cmd: &mut Command) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::newer;
+    use super::{Note, newer, parse_notes};
+
+    #[test]
+    fn notes() {
+        let body = "## What's new\n- **Update button.** Check from the sidebar.\n* Plain bullet\n\n**Full Changelog**: https://x";
+        assert_eq!(
+            parse_notes(body),
+            vec![
+                Note { title: Some("Update button.".into()), text: "Check from the sidebar.".into() },
+                Note { title: None, text: "Plain bullet".into() },
+            ]
+        );
+    }
 
     #[test]
     fn versions() {

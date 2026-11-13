@@ -19,7 +19,7 @@ gpui_kit::assets::icon_assets!(
     Icons,
     [
         Inbox, FilePen, Settings, ChevronRight, ChevronDown, Search, SearchX, Reply, ReplyAll, Paperclip, Image, Copy, Check,
-        Plus, Trash, ArrowLeft, Info, X, Archive, SquarePen, Mail, Pencil, Send, Download, LoaderCircle, RefreshCw
+        Plus, Trash, ArrowLeft, Info, X, Archive, SquarePen, Mail, Pencil, Send, Download, LoaderCircle, RefreshCw, ExternalLink
     ]
 );
 
